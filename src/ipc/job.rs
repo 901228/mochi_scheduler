@@ -15,10 +15,7 @@ pub enum JobState {
 
 impl JobState {
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            JobState::Finished | JobState::Killed | JobState::Failed
-        )
+        matches!(self, JobState::Finished | JobState::Killed | JobState::Failed)
     }
 
     pub fn as_str(&self) -> &'static str {

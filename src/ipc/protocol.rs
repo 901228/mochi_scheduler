@@ -78,3 +78,42 @@ where
     serde_json::from_slice(&buf)
         .map_err(|e| anyhow::Error::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn write_then_read_roundtrips_a_message() {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let sent = Request::Add {
+            argv: vec!["echo".into(), "hi".into()],
+            label: Some("x".into()),
+            cwd: PathBuf::from("/tmp"),
+        };
+
+        write_msg(&mut writer, &sent).await.unwrap();
+        let got: Request = read_msg(&mut reader).await.unwrap();
+
+        match got {
+            Request::Add { argv, label, cwd } => {
+                assert_eq!(argv, vec!["echo".to_string(), "hi".to_string()]);
+                assert_eq!(label.as_deref(), Some("x"));
+                assert_eq!(cwd, PathBuf::from("/tmp"));
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_rejects_an_oversized_frame() {
+        let (mut writer, mut reader) = tokio::io::duplex(64);
+        // A length prefix past the cap must fail before any body is read.
+        let len = (MAX_MSG_LEN as u32 + 1).to_be_bytes();
+        writer.write_all(&len).await.unwrap();
+        writer.flush().await.unwrap();
+
+        let res: anyhow::Result<Request> = read_msg(&mut reader).await;
+        assert!(res.is_err());
+    }
+}

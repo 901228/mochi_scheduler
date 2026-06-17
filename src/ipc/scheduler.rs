@@ -170,3 +170,169 @@ impl AppState {
         before - self.jobs.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    /// A unique path under the OS temp dir, so parallel tests don't collide.
+    fn temp_state_file() -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("mochi_test_{}_{n}.json", std::process::id()))
+    }
+
+    /// `add` only joins the log dir into a path; it never touches the filesystem,
+    /// so an arbitrary placeholder is fine for the in-memory tests.
+    fn log_dir() -> PathBuf {
+        PathBuf::from("logs")
+    }
+
+    fn enqueue(state: &mut AppState, argv: &str) -> u32 {
+        state.add(&log_dir(), vec![argv.to_string()], None, PathBuf::from("."))
+    }
+
+    #[test]
+    fn add_assigns_sequential_ids_and_queues() {
+        let mut s = AppState::default();
+        let id0 = s.add(&log_dir(), vec!["echo".into(), "hi".into()], None, ".".into());
+        let id1 = s.add(&log_dir(), vec!["ls".into()], Some("list".into()), ".".into());
+
+        assert_eq!((id0, id1), (0, 1));
+        let j0 = s.get(0).unwrap();
+        assert_eq!(j0.state, JobState::Queued);
+        assert_eq!(j0.log_path, log_dir().join("0.log"));
+        assert_eq!(s.get(1).unwrap().label.as_deref(), Some("list"));
+    }
+
+    #[test]
+    fn take_next_queued_picks_lowest_id_and_marks_running() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a");
+        enqueue(&mut s, "b");
+
+        let spec = s.take_next_queued().unwrap();
+        assert_eq!(spec.id, 0);
+        let j0 = s.get(0).unwrap();
+        assert_eq!(j0.state, JobState::Running);
+        assert!(j0.started_at.is_some());
+
+        assert_eq!(s.take_next_queued().unwrap().id, 1);
+        assert!(s.take_next_queued().is_none());
+    }
+
+    #[test]
+    fn finish_sets_state_per_result() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a");
+        enqueue(&mut s, "b");
+        enqueue(&mut s, "c");
+        s.take_next_queued();
+        s.take_next_queued();
+        s.take_next_queued();
+
+        s.finish(0, RunResult::Exited(Some(3)));
+        s.finish(1, RunResult::Killed);
+        s.finish(2, RunResult::SpawnFailed);
+
+        let j0 = s.get(0).unwrap();
+        assert_eq!(j0.state, JobState::Finished);
+        assert_eq!(j0.exit_code, Some(3));
+        assert!(j0.finished_at.is_some());
+        assert_eq!(s.get(1).unwrap().state, JobState::Killed);
+        assert_eq!(s.get(2).unwrap().state, JobState::Failed);
+    }
+
+    #[test]
+    fn request_kill_covers_every_outcome() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a"); // 0
+        enqueue(&mut s, "b"); // 1
+
+        // A queued job is dropped immediately and marked killed.
+        assert!(matches!(s.request_kill(0), KillOutcome::Dequeued));
+        assert_eq!(s.get(0).unwrap().state, JobState::Killed);
+
+        // A running job needs the daemon to signal its kill switch.
+        s.take_next_queued(); // picks id 1, since 0 is terminal
+        assert!(matches!(s.request_kill(1), KillOutcome::Running));
+
+        s.finish(1, RunResult::Exited(Some(0)));
+        assert!(matches!(s.request_kill(1), KillOutcome::AlreadyDone));
+        assert!(matches!(s.request_kill(99), KillOutcome::NotFound));
+    }
+
+    #[test]
+    fn remove_covers_every_outcome() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a");
+        s.take_next_queued(); // 0 running
+
+        assert!(matches!(s.remove(0), RemoveOutcome::Running));
+        s.finish(0, RunResult::Exited(Some(0)));
+        assert!(matches!(s.remove(0), RemoveOutcome::Removed));
+        assert!(s.get(0).is_none());
+        assert!(matches!(s.remove(0), RemoveOutcome::NotFound));
+    }
+
+    #[test]
+    fn clear_finished_keeps_running_and_queued() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a"); // 0
+        enqueue(&mut s, "b"); // 1
+        enqueue(&mut s, "c"); // 2
+        s.take_next_queued(); // 0 running
+        s.finish(0, RunResult::Exited(Some(0))); // 0 finished
+        s.take_next_queued(); // 1 running, left running
+
+        assert_eq!(s.clear_finished(), 1);
+        assert!(s.get(0).is_none()); // terminal -> removed
+        assert!(s.get(1).is_some()); // running -> kept
+        assert!(s.get(2).is_some()); // queued -> kept
+    }
+
+    #[test]
+    fn save_then_load_preserves_jobs_and_next_id() {
+        let mut s = AppState::default();
+        s.add(
+            &log_dir(),
+            vec!["echo".into(), "hi".into()],
+            Some("greet".into()),
+            ".".into(),
+        );
+        let path = temp_state_file();
+        s.save(&path).unwrap();
+
+        let mut loaded = AppState::load(&path).unwrap();
+        assert_eq!(loaded.get(0).unwrap().label.as_deref(), Some("greet"));
+        // next_id is persisted, so a fresh add keeps climbing instead of reusing 0.
+        assert_eq!(enqueue(&mut loaded, "next"), 1);
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_reconciles_running_jobs_to_failed() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a");
+        s.take_next_queued(); // 0 running when the daemon "dies"
+        let path = temp_state_file();
+        s.save(&path).unwrap();
+
+        let loaded = AppState::load(&path).unwrap();
+        let j = loaded.get(0).unwrap();
+        assert_eq!(j.state, JobState::Failed);
+        assert!(j.finished_at.is_some());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn load_missing_file_yields_empty_state() {
+        let s = AppState::load(&temp_state_file()).unwrap();
+        assert!(s.list().is_empty());
+    }
+}

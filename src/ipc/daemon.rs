@@ -115,6 +115,8 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
                 }
                 id
             };
+            // Wake the scheduler only after the state lock above is released,
+            // so it doesn't immediately block trying to re-acquire it.
             daemon.notify.notify_one();
             Response::Ok(format!("Queued job {id}"))
         }
@@ -203,6 +205,8 @@ async fn run_one(spec: &RunSpec, kill_rx: oneshot::Receiver<()>) -> RunResult {
             return RunResult::SpawnFailed;
         }
     };
+    // stdout and stderr share one handle to the same file, so the job's output
+    // is captured interleaved in a single log (what `cat` later prints).
     let stderr = match stdout.try_clone() {
         Ok(f) => f,
         Err(_) => return RunResult::SpawnFailed,
@@ -237,6 +241,11 @@ async fn run_one(spec: &RunSpec, kill_rx: oneshot::Receiver<()>) -> RunResult {
 }
 
 /// The scheduler runs queued jobs one at a time, in id order.
+///
+/// The outer loop blocks on `notify` (signalled by `add` and at startup); the
+/// inner loop then fully drains the queue. `Notify` only buffers a single
+/// permit, so draining completely here means a burst of `add`s that arrive
+/// while a job is running can't leave queued jobs stranded.
 async fn scheduler(daemon: Daemon) {
     loop {
         daemon.notify.notified().await;
