@@ -1,0 +1,80 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+use super::job::Job;
+
+/// A request sent from the client to the daemon.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Request {
+    Add {
+        argv: Vec<String>,
+        label: Option<String>,
+        cwd: PathBuf,
+    },
+    List,
+    Info {
+        id: u32,
+    },
+    Cat {
+        id: u32,
+    },
+    Kill {
+        id: u32,
+    },
+    Remove {
+        id: u32,
+    },
+    Clear,
+    Shutdown,
+}
+
+/// A response sent from the daemon back to the client.
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Response {
+    Ok(String),
+    Error(String),
+
+    Jobs(Vec<Job>),
+    Job(Job),
+    /// Path to a job's log file (resolved by the client, which reads it directly).
+    LogPath(PathBuf),
+}
+
+/// Largest message we are willing to read, to guard against bad framing.
+const MAX_MSG_LEN: usize = 16 * 1024 * 1024;
+
+/// Write a length-prefixed, JSON-encoded message.
+pub async fn write_msg<S, T>(stream: &mut S, msg: &T) -> anyhow::Result<()>
+where
+    S: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let bytes = serde_json::to_vec(msg)?;
+    stream.write_all(&(bytes.len() as u32).to_be_bytes()).await?;
+    stream.write_all(&bytes).await?;
+    stream.flush().await?;
+    Ok(())
+}
+
+/// Read a length-prefixed, JSON-encoded message.
+pub async fn read_msg<S, T>(stream: &mut S) -> anyhow::Result<T>
+where
+    S: AsyncRead + Unpin,
+    T: DeserializeOwned,
+{
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_MSG_LEN {
+        return Err(anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "message too large",
+        )));
+    }
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).await?;
+    serde_json::from_slice(&buf)
+        .map_err(|e| anyhow::Error::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+}
