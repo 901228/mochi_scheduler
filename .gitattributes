@@ -1,0 +1,8 @@
+# Normalize line endings: store as LF in the repo and check out as LF,
+# so the working tree is consistent across platforms (no CRLF warnings).
+* text=auto eol=lf
+
+# Binary files Git must never touch.
+*.png binary
+*.jpg binary
+*.ico binary
