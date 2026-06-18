@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use anyhow::Context;
 use chrono::Utc;
@@ -12,6 +15,8 @@ pub struct RunSpec {
     pub argv: Vec<String>,
     pub cwd: PathBuf,
     pub log_path: PathBuf,
+    /// GPU indices reserved for this job; passed to the child as visible devices.
+    pub assigned_gpus: Vec<u32>,
 }
 
 /// The outcome of running a job.
@@ -77,7 +82,14 @@ impl AppState {
 
 /// schedule
 impl AppState {
-    pub fn add(&mut self, log_dir: &PathBuf, argv: Vec<String>, label: Option<String>, cwd: PathBuf) -> u32 {
+    pub fn add(
+        &mut self,
+        log_dir: &PathBuf,
+        argv: Vec<String>,
+        label: Option<String>,
+        cwd: PathBuf,
+        gpus: u32,
+    ) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
         let job = Job {
@@ -91,6 +103,8 @@ impl AppState {
             enqueued_at: Utc::now(),
             started_at: None,
             finished_at: None,
+            gpus,
+            assigned_gpus: Vec::new(),
         };
         self.jobs.insert(id, job);
         id
@@ -104,27 +118,55 @@ impl AppState {
         self.jobs.get(&id).cloned()
     }
 
-    /// Pick the lowest-id queued job, mark it running, and return its run spec.
-    pub fn take_next_queued(&mut self) -> Option<RunSpec> {
+    /// GPU indices that are currently free: the full pool `0..gpu_total` minus
+    /// every index held by a running job.
+    fn free_gpus(&self, gpu_total: u32) -> BTreeSet<u32> {
+        let mut free: BTreeSet<u32> = (0..gpu_total).collect();
+        for job in self.jobs.values() {
+            if job.state == JobState::Running {
+                for idx in &job.assigned_gpus {
+                    free.remove(idx);
+                }
+            }
+        }
+        free
+    }
+
+    /// Pick the next queued job that fits the free GPU pool, reserve its GPUs,
+    /// mark it running, and return its run spec.
+    ///
+    /// Jobs are scanned in id order, but a job that needs more GPUs than are
+    /// free is skipped rather than blocking the queue (greedy backfill): a
+    /// 0-GPU job is always runnable, and a small job can start ahead of a larger
+    /// one that is still waiting for capacity. Returns `None` when nothing fits,
+    /// so the daemon can call this repeatedly to fill all available capacity.
+    pub fn take_next_runnable(&mut self, gpu_total: u32) -> Option<RunSpec> {
+        let free = self.free_gpus(gpu_total);
         let id = self
             .jobs
             .values()
-            .find(|j| j.state == JobState::Queued)
+            .find(|j| j.state == JobState::Queued && j.gpus as usize <= free.len())
             .map(|j| j.id)?;
+
+        let assigned: Vec<u32> = free.into_iter().take(self.jobs[&id].gpus as usize).collect();
         let job = self.jobs.get_mut(&id).expect("job exists");
         job.state = JobState::Running;
         job.started_at = Some(Utc::now());
+        job.assigned_gpus = assigned.clone();
         Some(RunSpec {
             id,
             argv: job.argv.clone(),
             cwd: job.cwd.clone(),
             log_path: job.log_path.clone(),
+            assigned_gpus: assigned,
         })
     }
 
     pub fn finish(&mut self, id: u32, result: RunResult) {
         if let Some(job) = self.jobs.get_mut(&id) {
             job.finished_at = Some(Utc::now());
+            // Release the job's GPUs back into the pool.
+            job.assigned_gpus.clear();
             match result {
                 RunResult::Exited(code) => {
                     job.exit_code = code;
@@ -192,14 +234,18 @@ mod tests {
     }
 
     fn enqueue(state: &mut AppState, argv: &str) -> u32 {
-        state.add(&log_dir(), vec![argv.to_string()], None, PathBuf::from("."))
+        enqueue_gpu(state, argv, 0)
+    }
+
+    fn enqueue_gpu(state: &mut AppState, argv: &str, gpus: u32) -> u32 {
+        state.add(&log_dir(), vec![argv.to_string()], None, PathBuf::from("."), gpus)
     }
 
     #[test]
     fn add_assigns_sequential_ids_and_queues() {
         let mut s = AppState::default();
-        let id0 = s.add(&log_dir(), vec!["echo".into(), "hi".into()], None, ".".into());
-        let id1 = s.add(&log_dir(), vec!["ls".into()], Some("list".into()), ".".into());
+        let id0 = s.add(&log_dir(), vec!["echo".into(), "hi".into()], None, ".".into(), 0);
+        let id1 = s.add(&log_dir(), vec!["ls".into()], Some("list".into()), ".".into(), 0);
 
         assert_eq!((id0, id1), (0, 1));
         let j0 = s.get(0).unwrap();
@@ -209,19 +255,19 @@ mod tests {
     }
 
     #[test]
-    fn take_next_queued_picks_lowest_id_and_marks_running() {
+    fn take_next_runnable_picks_lowest_id_and_marks_running() {
         let mut s = AppState::default();
         enqueue(&mut s, "a");
         enqueue(&mut s, "b");
 
-        let spec = s.take_next_queued().unwrap();
+        let spec = s.take_next_runnable(0).unwrap();
         assert_eq!(spec.id, 0);
         let j0 = s.get(0).unwrap();
         assert_eq!(j0.state, JobState::Running);
         assert!(j0.started_at.is_some());
 
-        assert_eq!(s.take_next_queued().unwrap().id, 1);
-        assert!(s.take_next_queued().is_none());
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 1);
+        assert!(s.take_next_runnable(0).is_none());
     }
 
     #[test]
@@ -230,9 +276,9 @@ mod tests {
         enqueue(&mut s, "a");
         enqueue(&mut s, "b");
         enqueue(&mut s, "c");
-        s.take_next_queued();
-        s.take_next_queued();
-        s.take_next_queued();
+        s.take_next_runnable(0);
+        s.take_next_runnable(0);
+        s.take_next_runnable(0);
 
         s.finish(0, RunResult::Exited(Some(3)));
         s.finish(1, RunResult::Killed);
@@ -257,7 +303,7 @@ mod tests {
         assert_eq!(s.get(0).unwrap().state, JobState::Killed);
 
         // A running job needs the daemon to signal its kill switch.
-        s.take_next_queued(); // picks id 1, since 0 is terminal
+        s.take_next_runnable(0); // picks id 1, since 0 is terminal
         assert!(matches!(s.request_kill(1), KillOutcome::Running));
 
         s.finish(1, RunResult::Exited(Some(0)));
@@ -269,7 +315,7 @@ mod tests {
     fn remove_covers_every_outcome() {
         let mut s = AppState::default();
         enqueue(&mut s, "a");
-        s.take_next_queued(); // 0 running
+        s.take_next_runnable(0); // 0 running
 
         assert!(matches!(s.remove(0), RemoveOutcome::Running));
         s.finish(0, RunResult::Exited(Some(0)));
@@ -284,9 +330,9 @@ mod tests {
         enqueue(&mut s, "a"); // 0
         enqueue(&mut s, "b"); // 1
         enqueue(&mut s, "c"); // 2
-        s.take_next_queued(); // 0 running
+        s.take_next_runnable(0); // 0 running
         s.finish(0, RunResult::Exited(Some(0))); // 0 finished
-        s.take_next_queued(); // 1 running, left running
+        s.take_next_runnable(0); // 1 running, left running
 
         assert_eq!(s.clear_finished(), 1);
         assert!(s.get(0).is_none()); // terminal -> removed
@@ -302,6 +348,7 @@ mod tests {
             vec!["echo".into(), "hi".into()],
             Some("greet".into()),
             ".".into(),
+            0,
         );
         let path = temp_state_file();
         s.save(&path).unwrap();
@@ -318,7 +365,7 @@ mod tests {
     fn load_reconciles_running_jobs_to_failed() {
         let mut s = AppState::default();
         enqueue(&mut s, "a");
-        s.take_next_queued(); // 0 running when the daemon "dies"
+        s.take_next_runnable(0); // 0 running when the daemon "dies"
         let path = temp_state_file();
         s.save(&path).unwrap();
 
@@ -334,5 +381,75 @@ mod tests {
     fn load_missing_file_yields_empty_state() {
         let s = AppState::load(&temp_state_file()).unwrap();
         assert!(s.list().is_empty());
+    }
+
+    #[test]
+    fn gpu_jobs_run_concurrently_until_pool_is_exhausted() {
+        let mut s = AppState::default();
+        enqueue_gpu(&mut s, "a", 1); // 0
+        enqueue_gpu(&mut s, "b", 1); // 1
+        enqueue_gpu(&mut s, "c", 1); // 2
+
+        // Pool of 2: the first two each grab a distinct GPU.
+        let a = s.take_next_runnable(2).unwrap();
+        let b = s.take_next_runnable(2).unwrap();
+        assert_eq!(a.assigned_gpus, vec![0]);
+        assert_eq!(b.assigned_gpus, vec![1]);
+        // Pool is full, so the third job stays queued.
+        assert!(s.take_next_runnable(2).is_none());
+        assert_eq!(s.get(2).unwrap().state, JobState::Queued);
+
+        // Finishing one releases its GPU, which the waiting job then reuses.
+        s.finish(0, RunResult::Exited(Some(0)));
+        let c = s.take_next_runnable(2).unwrap();
+        assert_eq!(c.id, 2);
+        assert_eq!(c.assigned_gpus, vec![0]);
+    }
+
+    #[test]
+    fn multi_gpu_job_reserves_contiguous_lowest_indices() {
+        let mut s = AppState::default();
+        enqueue_gpu(&mut s, "big", 3);
+        let spec = s.take_next_runnable(4).unwrap();
+        assert_eq!(spec.assigned_gpus, vec![0, 1, 2]);
+        assert_eq!(s.get(0).unwrap().assigned_gpus, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn backfill_runs_smaller_job_ahead_of_a_blocked_larger_one() {
+        let mut s = AppState::default();
+        enqueue_gpu(&mut s, "needs-two", 2); // 0, won't fit in 1 free GPU
+        enqueue_gpu(&mut s, "needs-one", 1); // 1, fits
+        enqueue(&mut s, "no-gpu"); // 2, always fits
+
+        // Only 1 GPU total: job 0 is skipped, job 1 takes the GPU.
+        let first = s.take_next_runnable(1).unwrap();
+        assert_eq!(first.id, 1);
+        assert_eq!(first.assigned_gpus, vec![0]);
+
+        // The 0-GPU job still runs even though job 0 is blocked.
+        let second = s.take_next_runnable(1).unwrap();
+        assert_eq!(second.id, 2);
+        assert!(second.assigned_gpus.is_empty());
+
+        // Job 0 remains queued, waiting for the GPU to free up.
+        assert!(s.take_next_runnable(1).is_none());
+        assert_eq!(s.get(0).unwrap().state, JobState::Queued);
+    }
+
+    #[test]
+    fn finish_releases_gpus_back_into_the_pool() {
+        let mut s = AppState::default();
+        enqueue_gpu(&mut s, "a", 2);
+        s.take_next_runnable(2);
+        assert!(s.get(0).unwrap().assigned_gpus == vec![0, 1]);
+
+        s.finish(0, RunResult::Exited(Some(0)));
+        assert!(s.get(0).unwrap().assigned_gpus.is_empty());
+        // Both GPUs are free again for a fresh job.
+        let id = enqueue_gpu(&mut s, "b", 2);
+        let spec = s.take_next_runnable(2).unwrap();
+        assert_eq!(spec.id, id);
+        assert_eq!(spec.assigned_gpus, vec![0, 1]);
     }
 }

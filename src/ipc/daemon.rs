@@ -16,7 +16,7 @@ use super::{
     protocol::{self, Request, Response},
     scheduler::{AppState, KillOutcome, RemoveOutcome, RunResult, RunSpec},
 };
-use crate::settings::Settings;
+use crate::{gpu, settings::Settings};
 
 /// Shared daemon state, cloned (via Arc) into every connection handler and the scheduler.
 #[derive(Clone)]
@@ -27,6 +27,8 @@ struct Daemon {
     notify: Arc<Notify>,
     /// Kill switches for currently running jobs, keyed by job id.
     kills: Arc<Mutex<HashMap<u32, oneshot::Sender<()>>>>,
+    /// Total GPUs on this host and the stack they belong to (detected at startup).
+    gpu: gpu::GpuInfo,
 }
 
 pub async fn run(settings: Settings) -> anyhow::Result<()> {
@@ -48,11 +50,15 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
     // Persist the post-load reconciliation (running -> failed) immediately.
     state.save(&settings.state_file)?;
 
+    let gpu = gpu::detect();
+    println!("msc daemon: detected {} GPU(s) ({:?})", gpu.count, gpu.vendor);
+
     let daemon = Daemon {
         settings,
         state: Arc::new(Mutex::new(state)),
         notify: Arc::new(Notify::new()),
         kills: Arc::new(Mutex::new(HashMap::new())),
+        gpu,
     };
 
     // Start the scheduler and kick it once in case there are leftover queued jobs.
@@ -106,10 +112,23 @@ async fn handle_conn(mut conn: Stream, daemon: Daemon) -> anyhow::Result<()> {
 
 fn handle_request(request: Request, daemon: &Daemon) -> Response {
     match request {
-        Request::Add { argv, label, cwd } => {
+        Request::Add {
+            argv,
+            label,
+            cwd,
+            gpus,
+        } => {
+            // Reject a request for more GPUs than exist, otherwise it would sit
+            // in the queue forever (the pool can never satisfy it).
+            if gpus > daemon.gpu.count {
+                return Response::Error(format!(
+                    "job requests {gpus} GPU(s) but only {} are available",
+                    daemon.gpu.count
+                ));
+            }
             let id = {
                 let mut state = daemon.state.lock().unwrap();
-                let id = state.add(&daemon.settings.log_dir, argv, label, cwd);
+                let id = state.add(&daemon.settings.log_dir, argv, label, cwd, gpus);
                 if let Err(e) = state.save(&daemon.settings.state_file) {
                     return Response::Error(format!("persisting state: {e}"));
                 }
@@ -197,7 +216,7 @@ fn persist(daemon: &Daemon) {
 }
 
 /// Launch one job, redirecting its output to the job's log file, and wait for it to finish or be killed.
-async fn run_one(spec: &RunSpec, kill_rx: oneshot::Receiver<()>) -> RunResult {
+async fn run_one(spec: &RunSpec, vendor: gpu::Vendor, kill_rx: oneshot::Receiver<()>) -> RunResult {
     let stdout = match std::fs::File::create(&spec.log_path) {
         Ok(f) => f,
         Err(e) => {
@@ -218,6 +237,21 @@ async fn run_one(spec: &RunSpec, kill_rx: oneshot::Receiver<()>) -> RunResult {
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+
+    // Isolate the job to exactly the GPUs it was assigned by exporting the
+    // vendor's visible-devices variable(s), e.g. CUDA_VISIBLE_DEVICES=0,2.
+    // For a 0-GPU job the value is empty, which hides every GPU on Unix. On
+    // Windows an empty value can't be set (the OS drops empty env vars), so a
+    // 0-GPU job there simply inherits whatever it would normally see.
+    let visible = spec
+        .assigned_gpus
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    for var in vendor.visible_devices_env() {
+        cmd.env(var, &visible);
+    }
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -240,12 +274,15 @@ async fn run_one(spec: &RunSpec, kill_rx: oneshot::Receiver<()>) -> RunResult {
     }
 }
 
-/// The scheduler runs queued jobs one at a time, in id order.
+/// The scheduler starts jobs as GPU capacity allows, running them concurrently.
 ///
-/// The outer loop blocks on `notify` (signalled by `add` and at startup); the
-/// inner loop then fully drains the queue. `Notify` only buffers a single
-/// permit, so draining completely here means a burst of `add`s that arrive
-/// while a job is running can't leave queued jobs stranded.
+/// The outer loop blocks on `notify` (signalled by `add`, at startup, and when
+/// a job finishes); the inner loop then starts every job that currently fits
+/// the free GPU pool. Unlike a serial queue it does *not* await each job here —
+/// each runs in its own task so multiple jobs proceed in parallel. A finishing
+/// job releases its GPUs and re-notifies, letting the scheduler backfill the
+/// freed capacity. `Notify` only buffers a single permit, but because each wake
+/// drains everything that fits, no queued job is left stranded.
 async fn scheduler(daemon: Daemon) {
     loop {
         daemon.notify.notified().await;
@@ -253,7 +290,7 @@ async fn scheduler(daemon: Daemon) {
         loop {
             let spec = {
                 let mut state = daemon.state.lock().unwrap();
-                state.take_next_queued()
+                state.take_next_runnable(daemon.gpu.count)
             };
             let Some(spec) = spec else { break };
             persist(&daemon);
@@ -261,14 +298,20 @@ async fn scheduler(daemon: Daemon) {
             let (kill_tx, kill_rx) = oneshot::channel();
             daemon.kills.lock().unwrap().insert(spec.id, kill_tx);
 
-            let result = run_one(&spec, kill_rx).await;
+            // Run the job concurrently; when it ends, free its GPUs and wake the
+            // scheduler so a waiting job can take the released capacity.
+            let daemon = daemon.clone();
+            tokio::spawn(async move {
+                let result = run_one(&spec, daemon.gpu.vendor, kill_rx).await;
 
-            daemon.kills.lock().unwrap().remove(&spec.id);
-            {
-                let mut state = daemon.state.lock().unwrap();
-                state.finish(spec.id, result);
-            }
-            persist(&daemon);
+                daemon.kills.lock().unwrap().remove(&spec.id);
+                {
+                    let mut state = daemon.state.lock().unwrap();
+                    state.finish(spec.id, result);
+                }
+                persist(&daemon);
+                daemon.notify.notify_one();
+            });
         }
     }
 }

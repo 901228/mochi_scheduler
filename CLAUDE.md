@@ -22,8 +22,26 @@ cargo clippy
 
 Edition is **2024** (requires a recent toolchain).
 
+### Iterating after a code change
+
+The daemon is **long-lived** and keeps running the binary it was first spawned
+from — it does not pick up rebuilds on its own. Always restart it after building:
+
+```bash
+cargo run -- shutdown   # stop the old daemon (or it keeps serving stale logic)
+cargo build             # IMPORTANT: a running daemon locks msc.exe on Windows,
+                        # so skipping the shutdown makes the rebuild fail silently
+cargo run -- <args>     # next client auto-spawns a fresh daemon
+```
+
+Symptoms of a stale daemon: new flags (e.g. `-g`) appear swallowed into the
+job's `argv`, or behavior doesn't match the current source. Note there is **one
+daemon per user** (the socket name is keyed on the username, not `MOCHI_HOME`),
+so `MOCHI_HOME` alone won't spin up a second, isolated daemon — shut the running
+one down first.
+
 ### CLI subcommands (`msc <cmd>`)
-`add [-l label] <argv...>`, `list`, `info <id>`, `cat <id>`, `kill <id>`,
+`add [-l label] [-g N] <argv...>`, `list`, `info <id>`, `cat <id>`, `kill <id>`,
 `remove <id>`, `clear`, `shutdown`. The hidden `__daemon` subcommand runs the
 background process and is not meant to be called directly.
 
@@ -42,10 +60,27 @@ runs `daemon::run`, everything else runs `client::run`.
   length-prefixed JSON framing (`write_msg`/`read_msg`, 16 MiB cap).
 - **Daemon (`ipc/daemon.rs`):** Accepts connections, each handled in its own
   task. `handle_request` mutates shared state under a `Mutex` and pokes a
-  `tokio::Notify`. A separate `scheduler` task waits on that `Notify`, then drains
-  all queued jobs one at a time via `run_one`. Running jobs are tracked in a
+  `tokio::Notify`. A separate `scheduler` task waits on that `Notify`, then starts
+  every job that fits the free GPU pool, each in its own `tokio::spawn` (jobs run
+  **concurrently**, not one at a time). A finishing job releases its GPUs and
+  re-notifies so the scheduler backfills. Running jobs are tracked in a
   `kills: HashMap<id, oneshot::Sender>`; `kill` fires the oneshot, which a
   `tokio::select!` in `run_one` uses to terminate the child.
+- **GPU scheduling (`gpu.rs` + `scheduler.rs`):** Each GPU is a resource. A job
+  declares a count (`msc add --gpus N`); `AppState::take_next_runnable(total)`
+  scans queued jobs in id order and starts the first whose need fits the free
+  pool (**greedy backfill** — a 0-GPU job is always runnable, a small job can run
+  ahead of a blocked larger one), reserving the lowest free indices in
+  `Job::assigned_gpus`. `run_one` isolates the child by exporting the vendor's
+  visible-devices var(s) (`CUDA_VISIBLE_DEVICES` for NVIDIA;
+  `HIP_VISIBLE_DEVICES`+`ROCR_VISIBLE_DEVICES` for AMD). GPU count/vendor are
+  detected once at daemon startup via `gpu::detect()` (`nvidia-smi -L` /
+  `rocm-smi`), overridable with `MOCHI_GPU_COUNT` (+ optional `MOCHI_GPU_VENDOR`)
+  — the supported way to test without real hardware. Adds requesting more GPUs
+  than exist are rejected. **Caveats:** (1) because 0-GPU jobs are always
+  runnable, plain (non-GPU) jobs now also run concurrently rather than serially;
+  (2) a 0-GPU job is hidden from all GPUs on Unix (empty visible-devices var),
+  but on Windows the empty value can't be set so it isn't GPU-isolated.
 - **State (`ipc/scheduler.rs::AppState`):** `BTreeMap<u32, Job>` + `next_id`,
   serialized to `state.json`. Persisted via **write-temp-then-rename** so a crash
   never leaves a half-written file. On `load`, any job still marked `Running`

@@ -18,6 +18,10 @@ pub enum Command {
         #[arg(short, long)]
         label: Option<String>,
 
+        /// Number of GPUs to reserve for the job (0 = none).
+        #[arg(short, long, default_value_t = 0)]
+        gpus: u32,
+
         /// The command and its arguments.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         argv: Vec<String>,

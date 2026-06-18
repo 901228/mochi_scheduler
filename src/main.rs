@@ -1,4 +1,5 @@
 mod cli;
+mod gpu;
 mod ipc;
 mod settings;
 mod utils;

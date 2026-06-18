@@ -30,10 +30,11 @@ pub async fn run(settings: Settings, command: Command) -> anyhow::Result<()> {
 
 fn build_request(command: Command) -> anyhow::Result<Request> {
     Ok(match command {
-        Command::Add { label, argv } => Request::Add {
+        Command::Add { label, gpus, argv } => Request::Add {
             argv,
             label,
             cwd: std::env::current_dir().context("getting current directory")?,
+            gpus,
         },
         Command::List => Request::List,
         Command::Info { id } => Request::Info { id },
@@ -155,6 +156,11 @@ fn print_job_details(job: &Job) -> anyhow::Result<()> {
         )
         .add_row(vec!["command", job.command_line().as_str()])
         .add_row(vec!["cwd", job.cwd.display().to_string().as_str()])
+        .add_row_if(|_| job.gpus > 0, |_| vec!["gpus".into(), job.gpus.to_string()])
+        .add_row_if(
+            |_| !job.assigned_gpus.is_empty(),
+            |_| vec!["assigned gpus".into(), format_gpu_list(&job.assigned_gpus)],
+        )
         .add_row_if(
             |_| job.exit_code.is_some(),
             |_| vec!["exit code".into(), job.exit_code.as_ref().unwrap().to_string()],
@@ -185,16 +191,25 @@ fn print_jobs(jobs: &[Job]) -> anyhow::Result<()> {
         // .load_preset(presets::UTF8_FULL_CONDENSED)
         // .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
         // .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec!["id", "state", "exit", "label", "command"])
+        .set_header(vec!["id", "state", "exit", "gpus", "label", "command"])
         .add_rows(jobs.iter().map(|job| {
             let exit = job
                 .exit_code
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "-".to_string());
+            // Show the assigned indices while running, otherwise the request count.
+            let gpus = if !job.assigned_gpus.is_empty() {
+                format_gpu_list(&job.assigned_gpus)
+            } else if job.gpus > 0 {
+                job.gpus.to_string()
+            } else {
+                "-".to_string()
+            };
             vec![
                 job.id.to_string(),
                 job.state.as_str().to_string(),
                 exit,
+                gpus,
                 job.label.clone().unwrap_or_default(),
                 job.command_line(),
             ]
@@ -202,4 +217,14 @@ fn print_jobs(jobs: &[Job]) -> anyhow::Result<()> {
 
     println!("{table}");
     Ok(())
+}
+
+/// Render assigned GPU indices like `[0,2]` for table display.
+fn format_gpu_list(indices: &[u32]) -> String {
+    let joined = indices
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("[{joined}]")
 }

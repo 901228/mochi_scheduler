@@ -41,6 +41,13 @@ pub struct Job {
     pub enqueued_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
+    /// Number of GPUs the job requested (0 means it never touches the GPU pool).
+    #[serde(default)]
+    pub gpus: u32,
+    /// GPU indices currently allocated to the job while it runs; empty otherwise.
+    /// `serde(default)` keeps older state files (without this field) loadable.
+    #[serde(default)]
+    pub assigned_gpus: Vec<u32>,
 }
 
 impl Job {

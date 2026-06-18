@@ -12,6 +12,7 @@ pub enum Request {
         argv: Vec<String>,
         label: Option<String>,
         cwd: PathBuf,
+        gpus: u32,
     },
     List,
     Info {
@@ -90,16 +91,23 @@ mod tests {
             argv: vec!["echo".into(), "hi".into()],
             label: Some("x".into()),
             cwd: PathBuf::from("/tmp"),
+            gpus: 2,
         };
 
         write_msg(&mut writer, &sent).await.unwrap();
         let got: Request = read_msg(&mut reader).await.unwrap();
 
         match got {
-            Request::Add { argv, label, cwd } => {
+            Request::Add {
+                argv,
+                label,
+                cwd,
+                gpus,
+            } => {
                 assert_eq!(argv, vec!["echo".to_string(), "hi".to_string()]);
                 assert_eq!(label.as_deref(), Some("x"));
                 assert_eq!(cwd, PathBuf::from("/tmp"));
+                assert_eq!(gpus, 2);
             }
             other => panic!("unexpected variant: {other:?}"),
         }
