@@ -42,9 +42,15 @@ so `MOCHI_HOME` alone won't spin up a second, isolated daemon — shut the runni
 one down first.
 
 ### CLI subcommands (`msc <cmd>`)
-`add [-l label] [-g N] <argv...>`, `list`, `info <id>`, `cat <id>`, `kill <id>`,
-`remove <id>`, `clear`, `shutdown`. The hidden `__daemon` subcommand runs the
-background process and is not meant to be called directly.
+`add [-l label] [-g N] <argv...>`, `list`, `info <id>`, `cat <id>`,
+`watch <id>`, `kill <id>`, `remove <id>`, `clear`, `shutdown`. The hidden
+`__daemon` subcommand runs the background process and is not meant to be called
+directly.
+
+`watch` is client-side only: it reuses `Info` (for log path + state) and tails
+the log file, polling until the job is terminal. Ctrl+C (via
+`tokio::signal::ctrl_c`) stops the watch but not the job — the job is the
+daemon's child, not the client's, so the client never has a way to signal it.
 
 ## Architecture
 

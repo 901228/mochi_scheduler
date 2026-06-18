@@ -32,6 +32,7 @@ msc add -l nightly -- ./train.sh  # give it a label; use `--` before flags meant
 msc list                          # see all jobs and their state
 msc info 3                        # full details for job 3
 msc cat 3                         # print job 3's captured output (stdout + stderr)
+msc watch 3                       # follow job 3's output live; Ctrl+C stops watching, not the job
 msc kill 3                        # stop a running job, or drop a queued one
 msc remove 3                      # remove a finished job from the list
 msc clear                         # remove all finished/killed/failed jobs

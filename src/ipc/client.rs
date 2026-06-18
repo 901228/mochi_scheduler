@@ -11,13 +11,15 @@ use super::{
     job::{Job, JobState},
     protocol::{self, Request, Response},
 };
-use crate::{
-    cli::Command,
-    settings::Settings,
-    utils::pretty_table::{Table, style::FrameCorner},
-};
+use crate::{cli::Command, settings::Settings, utils::pretty_table::Table};
 
 pub async fn run(settings: Settings, command: Command) -> anyhow::Result<()> {
+    // `watch` is not a single request/response: it polls and tails a log, so it
+    // gets its own path instead of going through build_request/render.
+    if let Command::Watch { id } = command {
+        return watch(&settings, id).await;
+    }
+
     let request = build_request(command)?;
     let mut conn = connect_or_spawn(&settings).await?;
     protocol::write_msg(&mut conn, &request).await?;
@@ -46,8 +48,86 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
         Command::Remove { id } => Request::Remove { id },
         Command::Clear => Request::Clear,
         Command::Shutdown => Request::Shutdown,
+        Command::Watch { .. } => unreachable!("watch is handled in run"),
         Command::Daemon => unreachable!("daemon is dispatched in main"),
     })
+}
+
+/// Follow a job's output live (like `tail -f`) until it reaches a terminal
+/// state or the user presses Ctrl+C.
+///
+/// Ctrl+C only stops watching — the job keeps running, because it is a child of
+/// the daemon, not of this client process. `Info` already returns the job's log
+/// path and state, so we poll it and stream new bytes from the log file.
+async fn watch(settings: &Settings, id: u32) -> anyhow::Result<()> {
+    // Fail fast with a clear error if the job doesn't exist.
+    if fetch_job(settings, id).await?.is_none() {
+        eprintln!("[ERROR] No such job (id {id})");
+        std::process::exit(1);
+    }
+
+    tokio::select! {
+        res = follow(settings, id) => res,
+        _ = tokio::signal::ctrl_c() => {
+            println!();
+            eprintln!("(stopped watching job {id}; it keeps running)");
+            Ok(())
+        }
+    }
+}
+
+/// Poll the job and stream new log bytes until it finishes.
+async fn follow(settings: &Settings, id: u32) -> anyhow::Result<()> {
+    let mut pos: u64 = 0;
+    loop {
+        let Some(job) = fetch_job(settings, id).await? else {
+            eprintln!("(job {id} no longer exists)");
+            return Ok(());
+        };
+        drain_log(&job.log_path, &mut pos).await?;
+        if job.state.is_terminal() {
+            // Drain once more in case bytes landed between the read and exit.
+            drain_log(&job.log_path, &mut pos).await?;
+            eprintln!("(job {id} {})", job.state.as_str());
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Write any bytes appended past `pos` to stdout, advancing `pos`. A log file
+/// that doesn't exist yet (job not started) is treated as empty.
+async fn drain_log(path: &std::path::Path, pos: &mut u64) -> anyhow::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let mut f = match tokio::fs::File::open(path).await {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).context("opening job log"),
+    };
+    f.seek(std::io::SeekFrom::Start(*pos)).await?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).await?;
+    if !buf.is_empty() {
+        use std::io::Write;
+        let mut out = std::io::stdout();
+        out.write_all(&buf)?;
+        out.flush()?;
+        *pos += buf.len() as u64;
+    }
+    Ok(())
+}
+
+/// Fetch a job's current state via an `Info` request. `Ok(None)` means no such job.
+async fn fetch_job(settings: &Settings, id: u32) -> anyhow::Result<Option<Job>> {
+    let mut conn = connect_or_spawn(settings).await?;
+    protocol::write_msg(&mut conn, &Request::Info { id }).await?;
+    let resp: Response = protocol::read_msg(&mut conn).await?;
+    match resp {
+        Response::Job(job) => Ok(Some(job)),
+        Response::Error(_) => Ok(None),
+        other => bail!("unexpected response to info: {other:?}"),
+    }
 }
 
 async fn connect(settings: &Settings) -> anyhow::Result<Stream> {

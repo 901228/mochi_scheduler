@@ -42,6 +42,12 @@ pub enum Command {
         id: u32,
     },
 
+    /// Follow a job's output live. Press Ctrl+C to stop watching; the job keeps running.
+    Watch {
+        /// Job id.
+        id: u32,
+    },
+
     /// Kill a running job, or drop a job that is still queued.
     Kill {
         /// Job id.
