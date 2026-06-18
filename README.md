@@ -105,6 +105,30 @@ while a job is running, that job is marked `failed` on the next start.
 There is **one daemon per user** (the socket name is keyed on the username), so
 all your shells share the same queue.
 
+## Troubleshooting
+
+### A progress bar (tqdm) or other output shows mojibake / garbled characters
+
+A job's output is captured to a log file, not a terminal. Many programs encode
+their output differently when it isn't a console: on a non-UTF-8 Windows (e.g. a
+zh-TW system whose locale is `cp950`), Python writes a redirected stream using
+that locale encoding, so non-ASCII characters — like tqdm's `█` bar glyph — are
+mangled at the source. `msc` stores those bytes verbatim, so `cat`/`watch` then
+shows the garbling. (Plain `python x.py > log 2>&1` has the same problem.)
+
+Fix it by making the program emit UTF-8. For Python, set `PYTHONUTF8=1` (or
+`PYTHONIOENCODING=utf-8`) in your shell before `msc add` — `msc` captures the
+environment at `add` time, so the job inherits it:
+
+```nu
+with-env { PYTHONUTF8: "1" } { msc add -- python train.py }
+# or persist it in your shell config (env.nu): $env.PYTHONUTF8 = "1"
+```
+
+For tqdm specifically, `tqdm(..., ascii=True)` draws the bar with ASCII and
+sidesteps the encoding issue entirely; `tqdm(..., disable=None)` auto-hides the
+bar when the output isn't a terminal.
+
 ## License
 
 MIT
