@@ -117,6 +117,7 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
             label,
             cwd,
             gpus,
+            env,
         } => {
             // Reject a request for more GPUs than exist, otherwise it would sit
             // in the queue forever (the pool can never satisfy it).
@@ -128,7 +129,7 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
             }
             let id = {
                 let mut state = daemon.state.lock().unwrap();
-                let id = state.add(&daemon.settings.log_dir, argv, label, cwd, gpus);
+                let id = state.add(&daemon.settings.log_dir, argv, label, cwd, gpus, env);
                 if let Err(e) = state.save(&daemon.settings.state_file) {
                     return Response::Error(format!("persisting state: {e}"));
                 }
@@ -237,6 +238,16 @@ async fn run_one(spec: &RunSpec, vendor: gpu::Vendor, kill_rx: oneshot::Receiver
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
+
+    // Run with the environment the client captured at `add` time, so the job
+    // sees the user's active shell (pixi/venv/conda PATH, etc.) instead of the
+    // daemon's. Replace the inherited env entirely; the captured snapshot is a
+    // complete environment. Legacy jobs (empty snapshot) keep inheriting the
+    // daemon env. GPU variables are applied afterwards so they always win.
+    if !spec.env.is_empty() {
+        cmd.env_clear();
+        cmd.envs(spec.env.iter().map(|(k, v)| (k, v)));
+    }
 
     // Isolate the job to exactly the GPUs it was assigned by exporting the
     // vendor's visible-devices variable(s), e.g. CUDA_VISIBLE_DEVICES=0,2.

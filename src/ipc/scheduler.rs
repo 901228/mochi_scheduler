@@ -17,6 +17,8 @@ pub struct RunSpec {
     pub log_path: PathBuf,
     /// GPU indices reserved for this job; passed to the child as visible devices.
     pub assigned_gpus: Vec<u32>,
+    /// Environment to run the job under (captured from the client at `add` time).
+    pub env: Vec<(String, String)>,
 }
 
 /// The outcome of running a job.
@@ -89,6 +91,7 @@ impl AppState {
         label: Option<String>,
         cwd: PathBuf,
         gpus: u32,
+        env: Vec<(String, String)>,
     ) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
@@ -105,6 +108,7 @@ impl AppState {
             finished_at: None,
             gpus,
             assigned_gpus: Vec::new(),
+            env,
         };
         self.jobs.insert(id, job);
         id
@@ -159,6 +163,7 @@ impl AppState {
             cwd: job.cwd.clone(),
             log_path: job.log_path.clone(),
             assigned_gpus: assigned,
+            env: job.env.clone(),
         })
     }
 
@@ -238,14 +243,35 @@ mod tests {
     }
 
     fn enqueue_gpu(state: &mut AppState, argv: &str, gpus: u32) -> u32 {
-        state.add(&log_dir(), vec![argv.to_string()], None, PathBuf::from("."), gpus)
+        state.add(
+            &log_dir(),
+            vec![argv.to_string()],
+            None,
+            PathBuf::from("."),
+            gpus,
+            Vec::new(),
+        )
     }
 
     #[test]
     fn add_assigns_sequential_ids_and_queues() {
         let mut s = AppState::default();
-        let id0 = s.add(&log_dir(), vec!["echo".into(), "hi".into()], None, ".".into(), 0);
-        let id1 = s.add(&log_dir(), vec!["ls".into()], Some("list".into()), ".".into(), 0);
+        let id0 = s.add(
+            &log_dir(),
+            vec!["echo".into(), "hi".into()],
+            None,
+            ".".into(),
+            0,
+            Vec::new(),
+        );
+        let id1 = s.add(
+            &log_dir(),
+            vec!["ls".into()],
+            Some("list".into()),
+            ".".into(),
+            0,
+            Vec::new(),
+        );
 
         assert_eq!((id0, id1), (0, 1));
         let j0 = s.get(0).unwrap();
@@ -349,6 +375,7 @@ mod tests {
             Some("greet".into()),
             ".".into(),
             0,
+            Vec::new(),
         );
         let path = temp_state_file();
         s.save(&path).unwrap();
@@ -435,6 +462,23 @@ mod tests {
         // Job 0 remains queued, waiting for the GPU to free up.
         assert!(s.take_next_runnable(1).is_none());
         assert_eq!(s.get(0).unwrap().state, JobState::Queued);
+    }
+
+    #[test]
+    fn captured_env_flows_through_to_the_run_spec() {
+        let mut s = AppState::default();
+        let env = vec![("PATH".to_string(), "/pixi/bin".to_string())];
+        s.add(
+            &log_dir(),
+            vec!["python".into()],
+            None,
+            ".".into(),
+            0,
+            env.clone(),
+        );
+
+        let spec = s.take_next_runnable(0).unwrap();
+        assert_eq!(spec.env, env);
     }
 
     #[test]

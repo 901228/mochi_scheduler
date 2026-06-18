@@ -35,6 +35,9 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
             label,
             cwd: std::env::current_dir().context("getting current directory")?,
             gpus,
+            // Snapshot the caller's environment so the job inherits the active
+            // shell's PATH/env (pixi, venv, conda, ...) instead of the daemon's.
+            env: std::env::vars().collect(),
         },
         Command::List => Request::List,
         Command::Info { id } => Request::Info { id },
@@ -146,7 +149,11 @@ fn print_job_details(job: &Job) -> anyhow::Result<()> {
     // absent label, which is left blank.
     let dash = || "-".to_string();
     let label = job.label.clone().unwrap_or_default();
-    let gpus = if job.gpus > 0 { job.gpus.to_string() } else { dash() };
+    let gpus = if job.gpus > 0 {
+        job.gpus.to_string()
+    } else {
+        dash()
+    };
     let assigned = if job.assigned_gpus.is_empty() {
         dash()
     } else {

@@ -89,6 +89,13 @@ runs `daemon::run`, everything else runs `client::run`.
   Killed, Failed}`. `is_terminal()` drives `clear`. Job output (stdout+stderr
   merged) is redirected to a per-job log file `<log_dir>/<id>.log`; `cat` returns
   the path and the **client** reads the file directly.
+- **Working dir & environment capture:** the client snapshots its `cwd` and full
+  environment (`std::env::vars()`) at `add` time and sends them in the request;
+  the job is persisted with both and `run_one` applies them (`env_clear` then the
+  snapshot, GPU vars layered on top). This is what makes a job run with the
+  caller's active shell env — e.g. a `pixi run nu` / venv / conda activation —
+  rather than the daemon's frozen one. Legacy jobs with an empty snapshot fall
+  back to inheriting the daemon env.
 - **Settings (`settings.rs`):** Resolves all paths under one data dir
   (`directories` crate, or `MOCHI_HOME` override — useful for tests/isolated
   queues). Socket name is **per-user** (`mochi-<user>.sock`) to avoid collisions

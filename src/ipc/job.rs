@@ -48,6 +48,10 @@ pub struct Job {
     /// `serde(default)` keeps older state files (without this field) loadable.
     #[serde(default)]
     pub assigned_gpus: Vec<u32>,
+    /// Environment captured from the client at `add` time, applied when the job
+    /// runs. Empty for legacy jobs, which then inherit the daemon's environment.
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
 }
 
 impl Job {
