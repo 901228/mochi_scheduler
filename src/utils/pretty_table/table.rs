@@ -11,7 +11,18 @@ pub struct Table {
 
     pub(super) header: Vec<String>,
     pub(super) rows: Vec<Vec<String>>,
+
+    /// Cap the rendered table at this total width (e.g. the terminal width);
+    /// the `flex_column` is shrunk and its cells truncated with `...` to fit.
+    pub(super) max_width: Option<usize>,
+    /// Index of the column allowed to shrink when `max_width` would be exceeded.
+    pub(super) flex_column: Option<usize>,
 }
+
+/// Smallest width the flex column is allowed to shrink to, so a truncated cell
+/// can still show a few characters plus the `...` marker.
+const MIN_FLEX_WIDTH: usize = 8;
+const ELLIPSIS: &str = "...";
 
 impl Table {
     pub fn new() -> Self {
@@ -26,7 +37,17 @@ impl Table {
             text_style: TextStyle::default(),
             header: Vec::new(),
             rows: Vec::new(),
+            max_width: None,
+            flex_column: None,
         }
+    }
+
+    /// Constrain the table to `width` columns, truncating `column`'s cells with
+    /// `...` when the natural layout would be wider.
+    pub fn fit_to_width(&mut self, width: usize, column: usize) -> &mut Self {
+        self.max_width = Some(width);
+        self.flex_column = Some(column);
+        self
     }
 }
 
@@ -122,9 +143,48 @@ impl Table {
 
                 column_lens.push(n);
             }
+            self.shrink_flex_column(&mut column_lens);
             Some(column_lens)
         }
     }
+
+    /// If a `max_width` is set and the natural layout is too wide, shrink the
+    /// flex column (never growing it, never below `MIN_FLEX_WIDTH`) so the table
+    /// fits. Cells in that column are truncated at render time.
+    fn shrink_flex_column(&self, column_lens: &mut [usize]) {
+        let (Some(max_width), Some(flex)) = (self.max_width, self.flex_column) else {
+            return;
+        };
+        if flex >= column_lens.len() {
+            return;
+        }
+        // Frame overhead: 2 padding spaces per column plus one separator between
+        // every column and the two outer borders (n + 1 vertical bars).
+        let n = column_lens.len();
+        let overhead = 2 * n + (n + 1);
+        let total: usize = column_lens.iter().sum::<usize>() + overhead;
+        if total <= max_width {
+            return;
+        }
+        let excess = total - max_width;
+        let target = column_lens[flex].saturating_sub(excess).max(MIN_FLEX_WIDTH);
+        if target < column_lens[flex] {
+            column_lens[flex] = target;
+        }
+    }
+}
+
+/// Truncate `s` to `width` display columns, ending with `...` when it overflows.
+fn fit_cell(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    if width <= ELLIPSIS.len() {
+        return s.chars().take(width).collect();
+    }
+    let mut out: String = s.chars().take(width - ELLIPSIS.len()).collect();
+    out.push_str(ELLIPSIS);
+    out
 }
 
 /// utils for render
@@ -151,16 +211,11 @@ impl Table {
                 )?;
             }
             let max_len = column_lens[i];
+            let cell = fit_cell(&content[i], max_len);
             match content_alignment {
-                TextAlignment::Left => {
-                    write!(f, " {:<max_len$} ", with_style(content[i].clone(), content_style))?
-                }
-                TextAlignment::Center => {
-                    write!(f, " {:^max_len$} ", with_style(content[i].clone(), content_style))?
-                }
-                TextAlignment::Right => {
-                    write!(f, " {:>max_len$} ", with_style(content[i].clone(), content_style))?
-                }
+                TextAlignment::Left => write!(f, " {:<max_len$} ", with_style(cell, content_style))?,
+                TextAlignment::Center => write!(f, " {:^max_len$} ", with_style(cell, content_style))?,
+                TextAlignment::Right => write!(f, " {:>max_len$} ", with_style(cell, content_style))?,
             };
         }
         writeln!(
@@ -341,4 +396,68 @@ fn term_test() {
         "BRIGHT_CYAN".bright_cyan().reversed(),
         "BRIGHT_WHITE".bright_white()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fit_cell_keeps_short_strings_and_truncates_long_ones() {
+        assert_eq!(fit_cell("short", 10), "short");
+        assert_eq!(fit_cell("hello world", 8), "hello...");
+        assert_eq!(fit_cell("hello world", 8).chars().count(), 8);
+        // Widths too small for the ellipsis just hard-cut.
+        assert_eq!(fit_cell("hello", 2), "he");
+    }
+
+    #[test]
+    fn shrink_flex_reduces_only_the_flex_column_to_fit() {
+        let mut t = Table::new();
+        t.fit_to_width(20, 1);
+        // natural: col0=3, col1=40; overhead = 2*2 + 3 = 7
+        // target for col1 = 20 - 7 - 3 = 10
+        let mut lens = vec![3, 40];
+        t.shrink_flex_column(&mut lens);
+        assert_eq!(lens, vec![3, 10]);
+    }
+
+    #[test]
+    fn shrink_flex_floors_at_minimum_and_accepts_overflow() {
+        let mut t = Table::new();
+        t.fit_to_width(5, 1);
+        let mut lens = vec![3, 40];
+        t.shrink_flex_column(&mut lens);
+        assert_eq!(lens[1], MIN_FLEX_WIDTH);
+    }
+
+    #[test]
+    fn shrink_flex_noop_when_it_already_fits() {
+        let mut t = Table::new();
+        t.fit_to_width(100, 1);
+        let mut lens = vec![3, 40];
+        t.shrink_flex_column(&mut lens);
+        assert_eq!(lens, vec![3, 40]);
+    }
+
+    #[test]
+    fn rendered_table_stays_within_max_width() {
+        colored::control::set_override(false); // deterministic: no ANSI in assertions
+        let mut t = Table::new();
+        t.set_header(vec!["id", "command"]).add_row(vec![
+            "1".to_string(),
+            "a-very-long-command-line-that-overflows".to_string(),
+        ]);
+        t.fit_to_width(20, 1);
+
+        let out = format!("{t}");
+        for line in out.lines() {
+            assert!(
+                line.chars().count() <= 20,
+                "line too wide ({}): {line:?}",
+                line.chars().count()
+            );
+        }
+        assert!(out.contains("..."), "expected a truncated cell:\n{out}");
+    }
 }

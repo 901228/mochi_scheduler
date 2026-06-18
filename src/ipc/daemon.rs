@@ -264,6 +264,15 @@ async fn run_one(spec: &RunSpec, vendor: gpu::Vendor, kill_rx: oneshot::Receiver
         cmd.env(var, &visible);
     }
 
+    // On Windows a console program launched by the (console-less) daemon would
+    // otherwise allocate its own console window. The job's stdio is already
+    // redirected to the log file, so suppress the window.
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {

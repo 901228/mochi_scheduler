@@ -298,6 +298,13 @@ fn print_jobs(jobs: &[Job]) -> anyhow::Result<()> {
             ]
         }));
 
+    // Keep the table within the terminal by truncating the (last) command column.
+    // When output isn't a terminal (piped/redirected), leave it untruncated.
+    if let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() {
+        const COMMAND_COLUMN: usize = 5;
+        table.fit_to_width(w as usize, COMMAND_COLUMN);
+    }
+
     println!("{table}");
     Ok(())
 }

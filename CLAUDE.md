@@ -111,7 +111,13 @@ runs `daemon::run`, everything else runs `client::run`.
 - **`utils/pretty_table`:** Hand-rolled table renderer (frame/header/text styles,
   colored output) used by the client to print `list` and `info`. It replaced
   `comfy_table` — leftover commented-out preset calls in `client.rs` are from that
-  migration.
+  migration. `fit_to_width(width, col)` caps the table at a width and truncates
+  that column's cells with `...`; `list` passes the detected terminal width
+  (`terminal_size`) and the command column, and skips truncation when output
+  isn't a terminal (piped/redirected).
+- **No console window for jobs (Windows):** `run_one` sets `CREATE_NO_WINDOW` on
+  the child so a console job spawned by the console-less daemon doesn't pop up a
+  window; its stdio is already redirected to the log file.
 
 ## Conventions
 
