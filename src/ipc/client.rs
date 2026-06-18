@@ -142,39 +142,35 @@ async fn render(response: Response) -> anyhow::Result<()> {
 }
 
 fn print_job_details(job: &Job) -> anyhow::Result<()> {
+    // Every field is always shown. Missing values render as "-", except an
+    // absent label, which is left blank.
+    let dash = || "-".to_string();
+    let label = job.label.clone().unwrap_or_default();
+    let gpus = if job.gpus > 0 { job.gpus.to_string() } else { dash() };
+    let assigned = if job.assigned_gpus.is_empty() {
+        dash()
+    } else {
+        format_gpu_list(&job.assigned_gpus)
+    };
+    let exit = job.exit_code.map(|c| c.to_string()).unwrap_or_else(dash);
+    let started = job.started_at.map(|t| t.to_rfc3339()).unwrap_or_else(dash);
+    let finished = job.finished_at.map(|t| t.to_rfc3339()).unwrap_or_else(dash);
+
     let mut table = Table::new();
     table
-        // .load_preset(presets::UTF8_FULL_CONDENSED)
-        // .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
-        // .set_content_arrangement(ContentArrangement::Dynamic)
         .set_header(vec!["key", "value"])
-        .add_row(vec!["id", job.id.to_string().as_str()])
-        .add_row(vec!["state", job.state.as_str()])
-        .add_row_if(
-            |_| job.label.is_some(),
-            |_| vec!["label", job.label.as_ref().unwrap()],
-        )
-        .add_row(vec!["command", job.command_line().as_str()])
-        .add_row(vec!["cwd", job.cwd.display().to_string().as_str()])
-        .add_row_if(|_| job.gpus > 0, |_| vec!["gpus".into(), job.gpus.to_string()])
-        .add_row_if(
-            |_| !job.assigned_gpus.is_empty(),
-            |_| vec!["assigned gpus".into(), format_gpu_list(&job.assigned_gpus)],
-        )
-        .add_row_if(
-            |_| job.exit_code.is_some(),
-            |_| vec!["exit code".into(), job.exit_code.as_ref().unwrap().to_string()],
-        )
-        .add_row(vec!["log", job.log_path.display().to_string().as_str()])
-        .add_row(vec!["enqueued", job.enqueued_at.to_rfc3339().as_str()])
-        .add_row_if(
-            |_| job.started_at.is_some(),
-            |_| vec!["started".into(), job.started_at.as_ref().unwrap().to_rfc3339()],
-        )
-        .add_row_if(
-            |_| job.finished_at.is_some(),
-            |_| vec!["finished".into(), job.finished_at.as_ref().unwrap().to_rfc3339()],
-        );
+        .add_row(vec!["id".to_string(), job.id.to_string()])
+        .add_row(vec!["state".to_string(), job.state.as_str().to_string()])
+        .add_row(vec!["label".to_string(), label])
+        .add_row(vec!["command".to_string(), job.command_line()])
+        .add_row(vec!["cwd".to_string(), job.cwd.display().to_string()])
+        .add_row(vec!["gpus".to_string(), gpus])
+        .add_row(vec!["assigned gpus".to_string(), assigned])
+        .add_row(vec!["exit code".to_string(), exit])
+        .add_row(vec!["log".to_string(), job.log_path.display().to_string()])
+        .add_row(vec!["enqueued".to_string(), job.enqueued_at.to_rfc3339()])
+        .add_row(vec!["started".to_string(), started])
+        .add_row(vec!["finished".to_string(), finished]);
 
     println!("{table}");
     if job.state == JobState::Running {
