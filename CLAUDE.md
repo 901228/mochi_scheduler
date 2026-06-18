@@ -18,6 +18,7 @@ cargo test                  # run tests
 cargo test <name>           # run a single test by name substring
 cargo fmt                   # format (config in rustfmt.toml: max_width 110, crate-granularity imports)
 cargo clippy
+cargo install --path .      # install `msc` into ~/.cargo/bin (already on PATH); re-run to update
 ```
 
 Edition is **2024** (requires a recent toolchain).
