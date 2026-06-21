@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::Context;
 use interprocess::local_socket::{
-    GenericFilePath, GenericNamespaced, ListenerOptions,
+    ListenerOptions,
     tokio::{Listener, Stream, prelude::*},
 };
 use tokio::sync::{Notify, oneshot};
@@ -84,19 +84,8 @@ pub async fn run(settings: Settings) -> anyhow::Result<()> {
 }
 
 fn bind(settings: &Settings) -> anyhow::Result<Listener> {
-    let (opts, socket_display_name) = if GenericNamespaced::is_supported() {
-        let name = settings.socket_ns.as_str().to_ns_name::<GenericNamespaced>()?;
-        (ListenerOptions::new().name(name), settings.socket_ns.clone())
-    } else {
-        // Best-effort cleanup of a stale socket file (only used on platforms
-        // without namespaced sockets).
-        let _ = std::fs::remove_file(&settings.socket_fs);
-        let name = settings.socket_fs.as_path().to_fs_name::<GenericFilePath>()?;
-        (
-            ListenerOptions::new().name(name),
-            settings.socket_fs.display().to_string(),
-        )
-    };
+    let (name, socket_display_name) = settings.socket_name(false)?;
+    let opts = ListenerOptions::new().name(name);
 
     opts.create_tokio()
         .with_context(|| format!("failed to bind socket {socket_display_name}"))

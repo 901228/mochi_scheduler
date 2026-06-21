@@ -2,10 +2,7 @@ use std::{process::Stdio, time::Duration};
 
 use anyhow::{Context, bail};
 // use comfy_table::{CellAlignment, ContentArrangement, Table, modifiers, presets};
-use interprocess::local_socket::{
-    GenericFilePath, GenericNamespaced,
-    tokio::{Stream, prelude::*},
-};
+use interprocess::local_socket::tokio::{Stream, prelude::*};
 
 use super::{
     job::{Job, JobState},
@@ -131,13 +128,7 @@ async fn fetch_job(settings: &Settings, id: u32) -> anyhow::Result<Option<Job>> 
 }
 
 async fn connect(settings: &Settings) -> anyhow::Result<Stream> {
-    let (name, socket_display_name) = if GenericNamespaced::is_supported() {
-        let name = settings.socket_ns.as_str().to_ns_name::<GenericNamespaced>()?;
-        (name, settings.socket_ns.clone())
-    } else {
-        let name = settings.socket_fs.as_path().to_fs_name::<GenericFilePath>()?;
-        (name, settings.socket_fs.display().to_string())
-    };
+    let (name, socket_display_name) = settings.socket_name(false)?;
 
     Stream::connect(name)
         .await

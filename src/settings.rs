@@ -10,7 +10,7 @@ use interprocess::local_socket::{GenericFilePath, GenericNamespaced, Name, tokio
 /// the `MOCHI_HOME` environment variable (useful for tests and for keeping separate queues).
 #[derive(Debug, Clone)]
 pub struct Settings {
-    pub data_dir: PathBuf,
+    _data_dir: PathBuf,
     pub state_file: PathBuf,
     pub log_dir: PathBuf,
     /// Name used for the namespaced socket (Linux abstract socket / Windows named pipe).
@@ -21,7 +21,7 @@ pub struct Settings {
 
 impl Settings {
     pub fn resolve() -> anyhow::Result<Self> {
-        let data_dir = match std::env::var_os("MOCHI_HOME") {
+        let _data_dir = match std::env::var_os("MOCHI_HOME") {
             Some(dir) => PathBuf::from(dir),
             None => ProjectDirs::from("org", "mochi", "msc")
                 .context("could not determine a home directory for mochi")?
@@ -29,7 +29,7 @@ impl Settings {
                 .to_path_buf(),
         };
 
-        let log_dir = data_dir.join("logs");
+        let log_dir = _data_dir.join("logs");
         std::fs::create_dir_all(&log_dir)
             .with_context(|| format!("creating data directory {}", log_dir.display()))?;
 
@@ -39,31 +39,28 @@ impl Settings {
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "default".to_string());
         let socket_ns = format!("mochi-{user}.sock");
-        let socket_fs = data_dir.join(format!("mochi-{user}.sock"));
+        let socket_fs = _data_dir.join(format!("mochi-{user}.sock"));
 
         Ok(Self {
-            state_file: data_dir.join("state.json"),
+            state_file: _data_dir.join("state.json"),
             log_dir,
             socket_ns,
             socket_fs,
-            data_dir,
+            _data_dir,
         })
     }
 
-    pub fn socket_name_display(&self) -> &str {
+    pub fn socket_name(&self, remove_file: bool) -> anyhow::Result<(Name<'_>, String)> {
         if GenericNamespaced::is_supported() {
-            self.socket_ns.as_str()
+            let name = self.socket_ns.as_str().to_ns_name::<GenericNamespaced>()?;
+            Ok((name, self.socket_ns.clone()))
         } else {
-            self.socket_fs.to_str().unwrap()
+            if remove_file {
+                // Best-effort cleanup of a stale socket file (only used on platforms without namespaced sockets).
+                let _ = std::fs::remove_file(&self.socket_fs);
+            }
+            let name = self.socket_fs.as_path().to_fs_name::<GenericFilePath>()?;
+            Ok((name, self.socket_fs.display().to_string()))
         }
-    }
-
-    pub fn socket_name(&self) -> anyhow::Result<Name<'_>> {
-        if GenericNamespaced::is_supported() {
-            self.socket_ns.as_str().to_ns_name::<GenericNamespaced>()
-        } else {
-            self.socket_fs.as_path().to_fs_name::<GenericFilePath>()
-        }
-        .context("Cannot get the socket name")
     }
 }
