@@ -47,6 +47,11 @@ pub enum RemoveOutcome {
 pub struct AppState {
     next_id: u32,
     jobs: BTreeMap<u32, Job>,
+    /// Max number of CPU (0-GPU) jobs allowed to run at once. `None` = unlimited.
+    /// GPU jobs are bounded by the GPU pool instead and ignore this. `serde(default)`
+    /// keeps older state files loadable.
+    #[serde(default)]
+    cpu_limit: Option<u32>,
 }
 
 /// recovery app state from disk
@@ -136,20 +141,50 @@ impl AppState {
         free
     }
 
+    /// Number of CPU (0-GPU) jobs currently running, used to enforce `cpu_limit`.
+    fn running_cpu_count(&self) -> u32 {
+        self.jobs
+            .values()
+            .filter(|j| j.state == JobState::Running && j.gpus == 0)
+            .count() as u32
+    }
+
+    /// The configured CPU-job concurrency cap (`None` = unlimited).
+    pub fn cpu_limit(&self) -> Option<u32> {
+        self.cpu_limit
+    }
+
+    /// Set the CPU-job concurrency cap (`None` = unlimited).
+    pub fn set_cpu_limit(&mut self, limit: Option<u32>) {
+        self.cpu_limit = limit;
+    }
+
     /// Pick the next queued job that fits the free GPU pool, reserve its GPUs,
     /// mark it running, and return its run spec.
     ///
-    /// Jobs are scanned in id order, but a job that needs more GPUs than are
-    /// free is skipped rather than blocking the queue (greedy backfill): a
-    /// 0-GPU job is always runnable, and a small job can start ahead of a larger
-    /// one that is still waiting for capacity. Returns `None` when nothing fits,
+    /// Jobs are scanned in id order, but a job that doesn't currently fit is
+    /// skipped rather than blocking the queue (greedy backfill): a small job can
+    /// start ahead of a larger one still waiting for capacity. A GPU job fits
+    /// when enough GPUs are free; a CPU (0-GPU) job fits while the number of
+    /// running CPU jobs is below `cpu_limit`. Returns `None` when nothing fits,
     /// so the daemon can call this repeatedly to fill all available capacity.
     pub fn take_next_runnable(&mut self, gpu_total: u32) -> Option<RunSpec> {
         let free = self.free_gpus(gpu_total);
+        let cpu_has_room = self
+            .cpu_limit
+            .is_none_or(|limit| self.running_cpu_count() < limit);
+
         let id = self
             .jobs
             .values()
-            .find(|j| j.state == JobState::Queued && j.gpus as usize <= free.len())
+            .find(|j| {
+                j.state == JobState::Queued
+                    && if j.gpus == 0 {
+                        cpu_has_room
+                    } else {
+                        j.gpus as usize <= free.len()
+                    }
+            })
             .map(|j| j.id)?;
 
         let assigned: Vec<u32> = free.into_iter().take(self.jobs[&id].gpus as usize).collect();
@@ -495,5 +530,53 @@ mod tests {
         let spec = s.take_next_runnable(2).unwrap();
         assert_eq!(spec.id, id);
         assert_eq!(spec.assigned_gpus, vec![0, 1]);
+    }
+
+    #[test]
+    fn cpu_limit_caps_concurrent_cpu_jobs() {
+        let mut s = AppState::default();
+        s.set_cpu_limit(Some(2));
+        enqueue(&mut s, "a"); // 0
+        enqueue(&mut s, "b"); // 1
+        enqueue(&mut s, "c"); // 2
+
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 0);
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 1);
+        // Limit of 2 reached, so the third stays queued.
+        assert!(s.take_next_runnable(0).is_none());
+        assert_eq!(s.get(2).unwrap().state, JobState::Queued);
+
+        // Finishing one frees a CPU slot for the waiting job.
+        s.finish(0, RunResult::Exited(Some(0)));
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 2);
+    }
+
+    #[test]
+    fn cpu_limit_does_not_throttle_gpu_jobs() {
+        let mut s = AppState::default();
+        s.set_cpu_limit(Some(1));
+        enqueue_gpu(&mut s, "cpu", 0); // 0
+        enqueue_gpu(&mut s, "g1", 1); // 1
+        enqueue_gpu(&mut s, "g2", 1); // 2
+
+        // One CPU job runs (limit 1); GPU jobs run per the GPU pool regardless.
+        assert_eq!(s.take_next_runnable(2).unwrap().id, 0);
+        assert_eq!(s.take_next_runnable(2).unwrap().id, 1);
+        assert_eq!(s.take_next_runnable(2).unwrap().id, 2);
+        assert!(s.take_next_runnable(2).is_none());
+    }
+
+    #[test]
+    fn cpu_limit_lets_a_gpu_job_backfill_past_a_blocked_cpu_job() {
+        let mut s = AppState::default();
+        s.set_cpu_limit(Some(1));
+        enqueue(&mut s, "cpu1"); // 0
+        enqueue(&mut s, "cpu2"); // 1
+        enqueue_gpu(&mut s, "g", 1); // 2
+
+        assert_eq!(s.take_next_runnable(2).unwrap().id, 0); // cpu1 fills the 1 CPU slot
+        assert_eq!(s.take_next_runnable(2).unwrap().id, 2); // cpu2 blocked, GPU job backfills
+        assert!(s.take_next_runnable(2).is_none());
+        assert_eq!(s.get(1).unwrap().state, JobState::Queued);
     }
 }

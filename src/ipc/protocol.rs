@@ -33,6 +33,12 @@ pub enum Request {
     },
     Clear,
     Shutdown,
+    /// Read the current CPU-job concurrency limit.
+    GetCpuLimit,
+    /// Set the CPU-job concurrency limit (`None` = unlimited).
+    SetCpuLimit {
+        limit: Option<u32>,
+    },
 }
 
 /// A response sent from the daemon back to the client.

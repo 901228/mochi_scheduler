@@ -43,9 +43,16 @@ one down first.
 
 ### CLI subcommands (`msc <cmd>`)
 `add [-l label] [-g N] <argv...>`, `list`, `info <id>`, `cat <id>`,
-`watch <id>`, `kill <id>`, `remove <id>`, `clear`, `shutdown`. The hidden
-`__daemon` subcommand runs the background process and is not meant to be called
-directly.
+`watch <id>`, `kill <id>`, `remove <id>`, `clear`, `cpu-limit [N]`,
+`shutdown`. The hidden `__daemon` subcommand runs the background process and is
+not meant to be called directly.
+
+`cpu-limit [N]` gets (no arg) or sets the max number of concurrent CPU (0-GPU)
+jobs; `0` means unlimited (the default). The cap lives in `AppState.cpu_limit`
+(persisted, `serde(default)` None) and is enforced in `take_next_runnable`: a
+0-GPU job is runnable only while `running_cpu_count() < cpu_limit`. GPU jobs are
+bounded by the GPU pool and ignore it. Client maps the arg (`0` → unlimited) to
+`SetCpuLimit`/`GetCpuLimit`; setting it re-notifies the scheduler.
 
 `watch` is client-side only: it reuses `Info` (for log path + state) and tails
 the log file, polling until the job is terminal. Ctrl+C (via

@@ -63,6 +63,15 @@ pub enum Command {
     /// Remove all finished/killed/failed jobs from the list.
     Clear,
 
+    /// Get or set how many CPU (non-GPU) jobs may run at once.
+    ///
+    /// With no argument, prints the current limit. Pass a number to set it;
+    /// `0` means unlimited. GPU jobs are bounded by the GPU pool, not this.
+    CpuLimit {
+        /// New limit (0 = unlimited). Omit to show the current value.
+        limit: Option<u32>,
+    },
+
     /// Stop the background daemon.
     Shutdown,
 

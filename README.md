@@ -36,6 +36,7 @@ msc watch 3                       # follow job 3's output live; Ctrl+C stops wat
 msc kill 3                        # stop a running job, or drop a queued one
 msc remove 3                      # remove a finished job from the list
 msc clear                         # remove all finished/killed/failed jobs
+msc cpu-limit 4                   # cap concurrent CPU (non-GPU) jobs at 4 (0 = unlimited)
 msc shutdown                      # stop the background daemon
 ```
 
@@ -76,6 +77,20 @@ MOCHI_GPU_COUNT=2 msc add -g 1 -- ./job.sh
 
 > Note: because a 0-GPU job always fits, plain (non-GPU) jobs also run
 > concurrently rather than one at a time.
+
+### Limiting CPU jobs
+
+By default CPU (non-GPU) jobs run with unlimited concurrency. Cap how many run at
+once with `cpu-limit`:
+
+```bash
+msc cpu-limit 4   # at most 4 CPU jobs run concurrently; the rest queue
+msc cpu-limit     # show the current limit
+msc cpu-limit 0   # unlimited again (the default)
+```
+
+The cap is persisted and applies only to CPU jobs; GPU jobs remain bounded by the
+GPU pool.
 
 ## Working directory & environment
 

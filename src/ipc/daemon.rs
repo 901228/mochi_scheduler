@@ -187,6 +187,22 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
             }
             Response::Ok(format!("Cleared {removed} finished jobs"))
         }
+        Request::GetCpuLimit => {
+            let limit = daemon.state.lock().unwrap().cpu_limit();
+            Response::Ok(format!("CPU job limit: {}", describe_cpu_limit(limit)))
+        }
+        Request::SetCpuLimit { limit } => {
+            {
+                let mut state = daemon.state.lock().unwrap();
+                state.set_cpu_limit(limit);
+                if let Err(e) = state.save(&daemon.settings.state_file) {
+                    return Response::Error(format!("persisting state: {e}"));
+                }
+            }
+            // Raising the limit may make queued CPU jobs runnable; wake the scheduler.
+            daemon.notify.notify_one();
+            Response::Ok(format!("CPU job limit set to {}", describe_cpu_limit(limit)))
+        }
         Request::Shutdown => {
             // Reply is sent by the caller before we exit, so schedule the exit.
             tokio::spawn(async {
@@ -195,6 +211,14 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
             });
             Response::Ok("Shutting down".into())
         }
+    }
+}
+
+/// Human-readable form of a CPU-job limit for command replies.
+fn describe_cpu_limit(limit: Option<u32>) -> String {
+    match limit {
+        None => "unlimited".to_string(),
+        Some(n) => n.to_string(),
     }
 }
 
