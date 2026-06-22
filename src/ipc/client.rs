@@ -8,7 +8,11 @@ use super::{
     job::{Job, JobState},
     protocol::{self, Request, Response},
 };
-use crate::{cli::Command, settings::Settings, utils::pretty_table::Table};
+use crate::{
+    cli::{Command, ConfigCommand},
+    settings::Settings,
+    utils::pretty_table::Table,
+};
 
 pub async fn run(settings: Settings, command: Command) -> anyhow::Result<()> {
     // `watch` is not a single request/response: it polls and tails a log, so it
@@ -44,10 +48,12 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
         Command::Kill { id } => Request::Kill { id },
         Command::Remove { id } => Request::Remove { id },
         Command::Clear => Request::Clear,
-        // No argument -> query; a number sets it, with 0 meaning unlimited.
-        Command::CpuLimit { limit: None } => Request::GetCpuLimit,
-        Command::CpuLimit { limit: Some(0) } => Request::SetCpuLimit { limit: None },
-        Command::CpuLimit { limit: Some(n) } => Request::SetCpuLimit { limit: Some(n) },
+        Command::Config { setting } => match setting {
+            // No argument -> query; a number sets it, with 0 meaning unlimited.
+            ConfigCommand::CpuLimit { limit: None } => Request::GetCpuLimit,
+            ConfigCommand::CpuLimit { limit: Some(0) } => Request::SetCpuLimit { limit: None },
+            ConfigCommand::CpuLimit { limit: Some(n) } => Request::SetCpuLimit { limit: Some(n) },
+        },
         Command::Shutdown => Request::Shutdown,
         Command::Watch { .. } => unreachable!("watch is handled in run"),
         Command::Daemon => unreachable!("daemon is dispatched in main"),

@@ -63,13 +63,10 @@ pub enum Command {
     /// Remove all finished/killed/failed jobs from the list.
     Clear,
 
-    /// Get or set how many CPU (non-GPU) jobs may run at once.
-    ///
-    /// With no argument, prints the current limit. Pass a number to set it;
-    /// `0` means unlimited. GPU jobs are bounded by the GPU pool, not this.
-    CpuLimit {
-        /// New limit (0 = unlimited). Omit to show the current value.
-        limit: Option<u32>,
+    /// View or change daemon settings.
+    Config {
+        #[command(subcommand)]
+        setting: ConfigCommand,
     },
 
     /// Stop the background daemon.
@@ -78,4 +75,18 @@ pub enum Command {
     /// Internal: run the background daemon (not meant to be called directly).
     #[command(name = "__daemon", hide = true)]
     Daemon,
+}
+
+/// Settings managed under `msc config <setting>`. New daemon-wide settings go
+/// here so they share one namespace and show up together in `msc config --help`.
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// Get or set how many CPU (non-GPU) jobs may run at once.
+    ///
+    /// With no argument, prints the current limit. Pass a number to set it;
+    /// `0` means unlimited. GPU jobs are bounded by the GPU pool, not this.
+    CpuLimit {
+        /// New limit (0 = unlimited). Omit to show the current value.
+        limit: Option<u32>,
+    },
 }
