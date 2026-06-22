@@ -78,9 +78,22 @@ pub fn detect() -> GpuInfo {
     }
 }
 
+/// Build a `Command` for a detection tool. On Windows we set `CREATE_NO_WINDOW`
+/// so probing GPUs from the console-less daemon doesn't flash a console window.
+fn probe(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Count NVIDIA GPUs via `nvidia-smi -L`, which prints one `GPU N: ...` line per device.
 fn detect_nvidia() -> Option<u32> {
-    let out = Command::new("nvidia-smi").arg("-L").output().ok()?;
+    let out = probe("nvidia-smi").arg("-L").output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -93,7 +106,7 @@ fn detect_nvidia() -> Option<u32> {
 
 /// Count AMD GPUs via `rocm-smi --showid`, which prints one `GPU[N]` line per device.
 fn detect_amd() -> Option<u32> {
-    let out = Command::new("rocm-smi").arg("--showid").output().ok()?;
+    let out = probe("rocm-smi").arg("--showid").output().ok()?;
     if !out.status.success() {
         return None;
     }
