@@ -37,6 +37,10 @@ pub enum Request {
         id: u32,
         priority: i32,
     },
+    /// Re-queue an existing job as a new job, re-running its command.
+    Rerun {
+        id: u32,
+    },
     Remove {
         id: u32,
     },

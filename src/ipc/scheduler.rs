@@ -136,6 +136,24 @@ impl AppState {
         id
     }
 
+    /// Re-queue an existing job as a fresh job (new id, new log file), copying
+    /// its command, working dir, GPU request, priority, label, and the
+    /// environment captured at the original `add`. The source job's record is
+    /// left untouched. Returns the new id, or `None` if no such job exists.
+    pub fn rerun(&mut self, log_dir: &PathBuf, id: u32) -> Option<u32> {
+        let job = self.jobs.get(&id)?;
+        // Clone the fields first so the immutable borrow ends before `add`.
+        let (argv, label, cwd, gpus, priority, env) = (
+            job.argv.clone(),
+            job.label.clone(),
+            job.cwd.clone(),
+            job.gpus,
+            job.priority,
+            job.env.clone(),
+        );
+        Some(self.add(log_dir, argv, label, cwd, gpus, priority, env))
+    }
+
     pub fn list(&self) -> Vec<Job> {
         self.jobs.values().cloned().collect()
     }
@@ -702,6 +720,50 @@ mod tests {
         assert_eq!(s.get(2).unwrap().state, JobState::Killed);
         // The already-finished job is left as-is.
         assert_eq!(s.get(0).unwrap().state, JobState::Finished);
+    }
+
+    #[test]
+    fn rerun_clones_job_into_a_fresh_queued_job() {
+        let mut s = AppState::default();
+        let env = vec![("PATH".to_string(), "/pixi/bin".to_string())];
+        let id = s.add(
+            &log_dir(),
+            vec!["echo".into(), "hi".into()],
+            Some("greet".into()),
+            PathBuf::from("/work"),
+            2,
+            5,
+            env.clone(),
+        );
+        s.take_next_runnable(4);
+        s.finish(id, RunResult::Exited(Some(1))); // original is now terminal
+
+        let new_id = s.rerun(&log_dir(), id).unwrap();
+        assert_ne!(new_id, id);
+
+        // Original record is untouched.
+        let orig = s.get(id).unwrap();
+        assert_eq!(orig.state, JobState::Finished);
+        assert_eq!(orig.exit_code, Some(1));
+
+        // New job is a fresh queued clone with its own log file.
+        let new = s.get(new_id).unwrap();
+        assert_eq!(new.state, JobState::Queued);
+        assert_eq!(new.argv, vec!["echo".to_string(), "hi".to_string()]);
+        assert_eq!(new.label.as_deref(), Some("greet"));
+        assert_eq!(new.cwd, PathBuf::from("/work"));
+        assert_eq!(new.gpus, 2);
+        assert_eq!(new.priority, 5);
+        assert_eq!(new.env, env);
+        assert_eq!(new.exit_code, None);
+        assert!(new.started_at.is_none());
+        assert_ne!(new.log_path, orig.log_path);
+    }
+
+    #[test]
+    fn rerun_missing_job_returns_none() {
+        let mut s = AppState::default();
+        assert!(s.rerun(&log_dir(), 42).is_none());
     }
 
     #[test]

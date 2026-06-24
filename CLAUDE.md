@@ -49,10 +49,22 @@ so `MOCHI_HOME` alone won't spin up a second, isolated daemon — shut the runni
 one down first.
 
 ### CLI subcommands (`msc <cmd>`)
-`add [-l label] [-g N] [-p N] <argv...>`, `list`, `info <id>`, `cat <id>`,
-`watch <id>`, `kill <id> | kill --all`, `priority <id> <n>`, `remove <id>`,
-`clear`, `config <setting>`, `shutdown`. The hidden `__daemon` subcommand runs
-the background process and is not meant to be called directly.
+`add [-l label] [-g N] [-p N] <argv...>`, `list [-a|--all] [-s|--state S]...`,
+`info <id>`, `cat <id>`, `watch <id>`, `kill <id> | kill --all`,
+`priority <id> <n>`, `rerun <id>`, `remove <id>`, `clear`, `config <setting>`,
+`shutdown`. The hidden `__daemon` subcommand runs the background process and is
+not meant to be called directly.
+
+`list` shows running and queued jobs by default; `--all` shows every state and
+`--state <S>` (repeatable, mutually exclusive with `--all`) shows exactly those
+states. Filtering is **client-side** (the daemon still returns all jobs), so the
+`List` protocol is unchanged.
+
+`rerun <id>` re-queues an existing job as a brand-new job (new id, new log),
+copying its argv, cwd, GPU request, priority, label, and the environment captured
+at the original `add` (`Request::Rerun` → `AppState::rerun`, which just clones
+those fields through `add`). The source job's record is left untouched; works for
+a job in any state.
 
 `kill --all` cancels every *active* job at once: running jobs get their kill
 switch fired (then become `Killed` via `finish`, like single `kill`) and queued

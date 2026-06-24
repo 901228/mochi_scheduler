@@ -81,6 +81,12 @@ pub enum Command {
         priority: i32,
     },
 
+    /// Re-run a job: queue a fresh copy of it (same command, dir, and environment).
+    Rerun {
+        /// Job id to re-run.
+        id: u32,
+    },
+
     /// Remove a finished or queued job from the list.
     Remove {
         /// Job id.

@@ -202,6 +202,29 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
                 SetPriorityOutcome::NotFound => Response::Error(format!("No such job (id {id})")),
             }
         }
+        Request::Rerun { id } => {
+            let new_id = {
+                let mut state = daemon.state.lock().unwrap();
+                let Some(job) = state.get(id) else {
+                    return Response::Error(format!("No such job (id {id})"));
+                };
+                // The original passed this check when added, but the GPU pool may
+                // have shrunk since (e.g. a daemon restart), so re-validate.
+                if job.gpus > daemon.gpu.count {
+                    return Response::Error(format!(
+                        "job requests {} GPU(s) but only {} are available",
+                        job.gpus, daemon.gpu.count
+                    ));
+                }
+                let new_id = state.rerun(&daemon.settings.log_dir, id).expect("job exists");
+                if let Err(e) = state.save(&daemon.settings.state_file) {
+                    return Response::Error(format!("persisting state: {e}"));
+                }
+                new_id
+            };
+            daemon.notify.notify_one();
+            Response::Ok(format!("Re-queued job {id} as job {new_id}"))
+        }
         Request::Remove { id } => {
             let mut state = daemon.state.lock().unwrap();
             match state.remove(id) {

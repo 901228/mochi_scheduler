@@ -62,6 +62,7 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
             id: id.expect("clap requires an id without --all"),
         },
         Command::Priority { id, priority } => Request::SetPriority { id, priority },
+        Command::Rerun { id } => Request::Rerun { id },
         Command::Remove { id } => Request::Remove { id },
         Command::Clear => Request::Clear,
         Command::Config { setting } => match setting {
