@@ -20,6 +20,9 @@ pub struct Table {
     /// When set, the `flex_column`'s overflowing cells are wrapped onto multiple
     /// lines instead of truncated with `...`.
     pub(super) wrap: bool,
+    /// Per-column alignment override for data rows (indexed by column; `None` =
+    /// use the default left alignment). The header row is unaffected.
+    pub(super) column_alignments: Vec<Option<TextAlignment>>,
 }
 
 /// Smallest width the flex column is allowed to shrink to, so a truncated cell
@@ -43,7 +46,18 @@ impl Table {
             max_width: None,
             flex_column: None,
             wrap: false,
+            column_alignments: Vec::new(),
         }
+    }
+
+    /// Right-align a column's data cells (e.g. numeric ids). The header keeps its
+    /// default centered alignment.
+    pub fn right_align_column(&mut self, index: usize) -> &mut Self {
+        if self.column_alignments.len() <= index {
+            self.column_alignments.resize_with(index + 1, || None);
+        }
+        self.column_alignments[index] = Some(TextAlignment::Right);
+        self
     }
 
     /// Constrain the table to `width` columns, truncating `column`'s cells with
@@ -222,6 +236,7 @@ impl Table {
         content: &Vec<String>,
         content_style: &dyn StringStyle,
         content_alignment: &TextAlignment,
+        apply_column_overrides: bool,
     ) -> std::fmt::Result {
         // Lay each cell out as one or more physical lines: the wrap column folds
         // onto multiple lines, every other column truncates to a single line. A
@@ -247,7 +262,17 @@ impl Table {
                 }
                 let max_len = column_lens[i];
                 let cell = cells[i].get(line).cloned().unwrap_or_default();
-                match content_alignment {
+                // A per-column override (e.g. right-aligned ids) applies only to
+                // data rows; the header keeps its own alignment.
+                let align = if apply_column_overrides {
+                    self.column_alignments
+                        .get(i)
+                        .and_then(|a| a.as_ref())
+                        .unwrap_or(content_alignment)
+                } else {
+                    content_alignment
+                };
+                match align {
                     TextAlignment::Left => write!(f, " {:<max_len$} ", with_style(cell, content_style))?,
                     TextAlignment::Center => write!(f, " {:^max_len$} ", with_style(cell, content_style))?,
                     TextAlignment::Right => write!(f, " {:>max_len$} ", with_style(cell, content_style))?,
@@ -312,6 +337,7 @@ impl Display for Table {
             &self.header,
             &self.header_style,
             &TextAlignment::Center,
+            false,
         )?;
         self.print_frame(
             f,
@@ -321,7 +347,7 @@ impl Display for Table {
             self.frame_style.get_frame_line().right_left(),
         )?;
         for row in self.rows.iter() {
-            self.print_row(f, &column_lens, row, &self.text_style, &TextAlignment::Left)?;
+            self.print_row(f, &column_lens, row, &self.text_style, &TextAlignment::Left, true)?;
         }
         self.print_frame(
             f,
@@ -336,6 +362,7 @@ impl Display for Table {
             &self.header,
             &self.header_style,
             &TextAlignment::Center,
+            false,
         )?;
         self.print_frame(
             f,

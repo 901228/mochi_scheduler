@@ -2,6 +2,7 @@ use colored::{Color, Style, Styles};
 
 use super::StringStyle;
 
+#[derive(Clone, Copy)]
 pub enum TextAlignment {
     Left,
     Center,

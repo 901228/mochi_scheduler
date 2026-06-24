@@ -383,6 +383,9 @@ fn print_jobs(jobs: &[Job]) -> anyhow::Result<()> {
             ]
         }));
 
+    // Right-align the numeric id column.
+    table.right_align_column(0);
+
     // Keep the table within the terminal by truncating the (last) command column.
     // When output isn't a terminal (piped/redirected), leave it untruncated.
     if let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() {
