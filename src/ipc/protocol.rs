@@ -13,6 +13,8 @@ pub enum Request {
         label: Option<String>,
         cwd: PathBuf,
         gpus: u32,
+        /// Scheduling priority; higher runs first, ties break by id.
+        priority: i32,
         /// The client's full environment at `add` time, so the job runs with the
         /// same PATH/env the user had in their shell (e.g. a pixi/venv/conda
         /// activation) rather than the daemon's frozen environment.
@@ -27,6 +29,11 @@ pub enum Request {
     },
     Kill {
         id: u32,
+    },
+    /// Change a queued job's scheduling priority.
+    SetPriority {
+        id: u32,
+        priority: i32,
     },
     Remove {
         id: u32,
@@ -102,6 +109,7 @@ mod tests {
             label: Some("x".into()),
             cwd: PathBuf::from("/tmp"),
             gpus: 2,
+            priority: 5,
             env: vec![("KEY".into(), "VALUE".into())],
         };
 
@@ -114,12 +122,14 @@ mod tests {
                 label,
                 cwd,
                 gpus,
+                priority,
                 env,
             } => {
                 assert_eq!(argv, vec!["echo".to_string(), "hi".to_string()]);
                 assert_eq!(label.as_deref(), Some("x"));
                 assert_eq!(cwd, PathBuf::from("/tmp"));
                 assert_eq!(gpus, 2);
+                assert_eq!(priority, 5);
                 assert_eq!(env, vec![("KEY".to_string(), "VALUE".to_string())]);
             }
             other => panic!("unexpected variant: {other:?}"),

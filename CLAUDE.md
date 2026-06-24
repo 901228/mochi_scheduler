@@ -42,10 +42,15 @@ so `MOCHI_HOME` alone won't spin up a second, isolated daemon — shut the runni
 one down first.
 
 ### CLI subcommands (`msc <cmd>`)
-`add [-l label] [-g N] <argv...>`, `list`, `info <id>`, `cat <id>`,
-`watch <id>`, `kill <id>`, `remove <id>`, `clear`, `config <setting>`,
-`shutdown`. The hidden `__daemon` subcommand runs the background process and is
-not meant to be called directly.
+`add [-l label] [-g N] [-p N] <argv...>`, `list`, `info <id>`, `cat <id>`,
+`watch <id>`, `kill <id>`, `priority <id> <n>`, `remove <id>`,
+`clear`, `config <setting>`, `shutdown`. The hidden `__daemon` subcommand runs
+the background process and is not meant to be called directly.
+
+`priority <id> <n>` re-prioritises a **queued** job so it can jump the queue
+(`Request::SetPriority`); it errors on running/terminal jobs
+(`SetPriorityOutcome::NotQueued`). `add -p N` sets a job's priority at enqueue
+time.
 
 Daemon settings live under `msc config <setting>` (a nested `clap` subcommand,
 `ConfigCommand` in `cli.rs`) so they share one namespace and `--help` lists them
@@ -87,10 +92,13 @@ runs `daemon::run`, everything else runs `client::run`.
   `tokio::select!` in `run_one` uses to terminate the child.
 - **GPU scheduling (`gpu.rs` + `scheduler.rs`):** Each GPU is a resource. A job
   declares a count (`msc add --gpus N`); `AppState::take_next_runnable(total)`
-  scans queued jobs in id order and starts the first whose need fits the free
-  pool (**greedy backfill** — a 0-GPU job is always runnable, a small job can run
-  ahead of a blocked larger one), reserving the lowest free indices in
-  `Job::assigned_gpus`. `run_one` isolates the child by exporting the vendor's
+  scans queued jobs and, among those that currently fit the free pool, starts the
+  one with the highest `Job::priority` (ties broken by lowest id). A job that
+  doesn't fit is skipped rather than blocking the queue (**greedy backfill** — a
+  0-GPU job is always runnable, a small/higher-priority job can run ahead of a
+  blocked larger one), reserving the lowest free indices in `Job::assigned_gpus`.
+  Priority is set at enqueue (`add -p N`, default 0) or changed for a queued job
+  with `priority <id> <n>`; higher runs first. `run_one` isolates the child by exporting the vendor's
   visible-devices var(s) (`CUDA_VISIBLE_DEVICES` for NVIDIA;
   `HIP_VISIBLE_DEVICES`+`ROCR_VISIBLE_DEVICES` for AMD). GPU count/vendor are
   detected once at daemon startup via `gpu::detect()` (`nvidia-smi -L` /

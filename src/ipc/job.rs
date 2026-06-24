@@ -41,6 +41,10 @@ pub struct Job {
     pub enqueued_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
+    /// Scheduling priority; higher runs first, ties break by id. `serde(default)`
+    /// (0) keeps older state files loadable.
+    #[serde(default)]
+    pub priority: i32,
     /// Number of GPUs the job requested (0 means it never touches the GPU pool).
     #[serde(default)]
     pub gpus: u32,

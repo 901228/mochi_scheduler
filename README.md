@@ -29,10 +29,12 @@ the installed binary.
 ```bash
 msc add cargo build --release     # queue a command (everything after `add` is the command)
 msc add -l nightly -- ./train.sh  # give it a label; use `--` before flags meant for the command
+msc add -p 10 -- ./urgent.sh      # queue at higher priority so it runs before normal jobs
 msc list                          # see all jobs and their state
 msc info 3                        # full details for job 3
 msc cat 3                         # print job 3's captured output (stdout + stderr)
 msc watch 3                       # follow job 3's output live; Ctrl+C stops watching, not the job
+msc priority 3 10                 # bump a queued job's priority so it jumps the queue
 msc kill 3                        # stop a running job, or drop a queued one
 msc remove 3                      # remove a finished job from the list
 msc clear                         # remove all finished/killed/failed jobs
@@ -77,6 +79,22 @@ MOCHI_GPU_COUNT=2 msc add -g 1 -- ./job.sh
 
 > Note: because a 0-GPU job always fits, plain (non-GPU) jobs also run
 > concurrently rather than one at a time.
+
+### Priority (jumping the queue)
+
+Every job has a scheduling priority (default `0`). When capacity frees up, the
+scheduler starts the highest-priority job that fits; ties break by id (oldest
+first), so equal-priority jobs keep FIFO order.
+
+```bash
+msc add -p 10 -- ./urgent.sh   # enqueue ahead of normal (priority 0) jobs
+msc priority 7 5               # bump an already-queued job so it runs sooner
+msc priority 7 -1             # or push one to the back with a lower priority
+```
+
+`priority` only affects **queued** jobs — a job that has already started keeps
+running. Priority changes the *order* jobs start in, not whether a job fits: a
+high-priority GPU job still waits until enough GPUs are free.
 
 ### Limiting CPU jobs
 

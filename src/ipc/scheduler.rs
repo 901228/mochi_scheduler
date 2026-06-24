@@ -42,6 +42,14 @@ pub enum RemoveOutcome {
     NotFound,
 }
 
+pub enum SetPriorityOutcome {
+    Updated,
+    /// The job exists but isn't queued (already running or terminal), so
+    /// re-prioritising it has no effect.
+    NotQueued,
+    NotFound,
+}
+
 /// The full in-memory state of the queue, persisted to disk as JSON.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct AppState {
@@ -96,6 +104,7 @@ impl AppState {
         label: Option<String>,
         cwd: PathBuf,
         gpus: u32,
+        priority: i32,
         env: Vec<(String, String)>,
     ) -> u32 {
         let id = self.next_id;
@@ -111,6 +120,7 @@ impl AppState {
             enqueued_at: Utc::now(),
             started_at: None,
             finished_at: None,
+            priority,
             gpus,
             assigned_gpus: Vec::new(),
             env,
@@ -162,12 +172,13 @@ impl AppState {
     /// Pick the next queued job that fits the free GPU pool, reserve its GPUs,
     /// mark it running, and return its run spec.
     ///
-    /// Jobs are scanned in id order, but a job that doesn't currently fit is
-    /// skipped rather than blocking the queue (greedy backfill): a small job can
-    /// start ahead of a larger one still waiting for capacity. A GPU job fits
-    /// when enough GPUs are free; a CPU (0-GPU) job fits while the number of
-    /// running CPU jobs is below `cpu_limit`. Returns `None` when nothing fits,
-    /// so the daemon can call this repeatedly to fill all available capacity.
+    /// Among the queued jobs that currently fit, the highest `priority` wins and
+    /// id breaks ties (lowest first). A job that doesn't currently fit is skipped
+    /// rather than blocking the queue (greedy backfill): a smaller / higher-fitting
+    /// job can start ahead of one still waiting for capacity. A GPU job fits when
+    /// enough GPUs are free; a CPU (0-GPU) job fits while the number of running
+    /// CPU jobs is below `cpu_limit`. Returns `None` when nothing fits, so the
+    /// daemon can call this repeatedly to fill all available capacity.
     pub fn take_next_runnable(&mut self, gpu_total: u32) -> Option<RunSpec> {
         let free = self.free_gpus(gpu_total);
         let cpu_has_room = self
@@ -177,7 +188,7 @@ impl AppState {
         let id = self
             .jobs
             .values()
-            .find(|j| {
+            .filter(|j| {
                 j.state == JobState::Queued
                     && if j.gpus == 0 {
                         cpu_has_room
@@ -185,6 +196,8 @@ impl AppState {
                         j.gpus as usize <= free.len()
                     }
             })
+            // Higher priority first (negate), then lowest id.
+            .min_by_key(|j| (-j.priority, j.id))
             .map(|j| j.id)?;
 
         let assigned: Vec<u32> = free.into_iter().take(self.jobs[&id].gpus as usize).collect();
@@ -231,6 +244,19 @@ impl AppState {
                 }
                 _ => KillOutcome::AlreadyDone,
             },
+        }
+    }
+
+    /// Change a queued job's priority. Only queued jobs can be re-prioritised; a
+    /// running job has already started and a terminal one is done.
+    pub fn set_priority(&mut self, id: u32, priority: i32) -> SetPriorityOutcome {
+        match self.jobs.get_mut(&id) {
+            None => SetPriorityOutcome::NotFound,
+            Some(job) if job.state == JobState::Queued => {
+                job.priority = priority;
+                SetPriorityOutcome::Updated
+            }
+            Some(_) => SetPriorityOutcome::NotQueued,
         }
     }
 
@@ -284,6 +310,19 @@ mod tests {
             None,
             PathBuf::from("."),
             gpus,
+            0,
+            Vec::new(),
+        )
+    }
+
+    fn enqueue_prio(state: &mut AppState, argv: &str, priority: i32) -> u32 {
+        state.add(
+            &log_dir(),
+            vec![argv.to_string()],
+            None,
+            PathBuf::from("."),
+            0,
+            priority,
             Vec::new(),
         )
     }
@@ -297,6 +336,7 @@ mod tests {
             None,
             ".".into(),
             0,
+            0,
             Vec::new(),
         );
         let id1 = s.add(
@@ -304,6 +344,7 @@ mod tests {
             vec!["ls".into()],
             Some("list".into()),
             ".".into(),
+            0,
             0,
             Vec::new(),
         );
@@ -410,6 +451,7 @@ mod tests {
             Some("greet".into()),
             ".".into(),
             0,
+            0,
             Vec::new(),
         );
         let path = temp_state_file();
@@ -509,6 +551,7 @@ mod tests {
             None,
             ".".into(),
             0,
+            0,
             env.clone(),
         );
 
@@ -564,6 +607,51 @@ mod tests {
         assert_eq!(s.take_next_runnable(2).unwrap().id, 1);
         assert_eq!(s.take_next_runnable(2).unwrap().id, 2);
         assert!(s.take_next_runnable(2).is_none());
+    }
+
+    #[test]
+    fn higher_priority_job_runs_first_even_if_queued_later() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "low"); // 0, priority 0
+        enqueue_prio(&mut s, "high", 5); // 1, jumps ahead
+        enqueue_prio(&mut s, "mid", 1); // 2
+
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 1); // highest priority
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 2); // next highest
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 0); // default priority last
+    }
+
+    #[test]
+    fn equal_priority_breaks_ties_by_id() {
+        let mut s = AppState::default();
+        enqueue_prio(&mut s, "a", 3); // 0
+        enqueue_prio(&mut s, "b", 3); // 1
+
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 0);
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 1);
+    }
+
+    #[test]
+    fn set_priority_lets_a_queued_job_jump_the_queue() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a"); // 0
+        enqueue(&mut s, "b"); // 1
+        enqueue(&mut s, "c"); // 2
+
+        // Bump the last job above the others; it now runs first.
+        assert!(matches!(s.set_priority(2, 10), SetPriorityOutcome::Updated));
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 2);
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 0);
+    }
+
+    #[test]
+    fn set_priority_covers_non_queued_and_missing_jobs() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a"); // 0
+        s.take_next_runnable(0); // 0 now running
+
+        assert!(matches!(s.set_priority(0, 5), SetPriorityOutcome::NotQueued));
+        assert!(matches!(s.set_priority(99, 5), SetPriorityOutcome::NotFound));
     }
 
     #[test]

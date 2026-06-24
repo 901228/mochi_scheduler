@@ -22,6 +22,10 @@ pub enum Command {
         #[arg(short, long, default_value_t = 0)]
         gpus: u32,
 
+        /// Scheduling priority; higher runs first, ties break by id (default 0).
+        #[arg(short, long, default_value_t = 0, allow_hyphen_values = true)]
+        priority: i32,
+
         /// The command and its arguments.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         argv: Vec<String>,
@@ -52,6 +56,16 @@ pub enum Command {
     Kill {
         /// Job id.
         id: u32,
+    },
+
+    /// Change the priority of a queued job to let it jump the queue.
+    Priority {
+        /// Job id.
+        id: u32,
+
+        /// New priority; higher runs first (default 0).
+        #[arg(allow_hyphen_values = true)]
+        priority: i32,
     },
 
     /// Remove a finished or queued job from the list.

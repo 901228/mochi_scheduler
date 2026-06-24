@@ -33,11 +33,17 @@ pub async fn run(settings: Settings, command: Command) -> anyhow::Result<()> {
 
 fn build_request(command: Command) -> anyhow::Result<Request> {
     Ok(match command {
-        Command::Add { label, gpus, argv } => Request::Add {
+        Command::Add {
+            label,
+            gpus,
+            priority,
+            argv,
+        } => Request::Add {
             argv,
             label,
             cwd: std::env::current_dir().context("getting current directory")?,
             gpus,
+            priority,
             // Snapshot the caller's environment so the job inherits the active
             // shell's PATH/env (pixi, venv, conda, ...) instead of the daemon's.
             env: std::env::vars().collect(),
@@ -46,6 +52,7 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
         Command::Info { id } => Request::Info { id },
         Command::Cat { id } => Request::Cat { id },
         Command::Kill { id } => Request::Kill { id },
+        Command::Priority { id, priority } => Request::SetPriority { id, priority },
         Command::Remove { id } => Request::Remove { id },
         Command::Clear => Request::Clear,
         Command::Config { setting } => match setting {
@@ -252,6 +259,7 @@ fn print_job_details(job: &Job) -> anyhow::Result<()> {
         .add_row(vec!["label".to_string(), label])
         .add_row(vec!["command".to_string(), job.command_line()])
         .add_row(vec!["cwd".to_string(), job.cwd.display().to_string()])
+        .add_row(vec!["priority".to_string(), job.priority.to_string()])
         .add_row(vec!["gpus".to_string(), gpus])
         .add_row(vec!["assigned gpus".to_string(), assigned])
         .add_row(vec!["exit code".to_string(), exit])
@@ -275,7 +283,7 @@ fn print_jobs(jobs: &[Job]) -> anyhow::Result<()> {
         // .load_preset(presets::UTF8_FULL_CONDENSED)
         // .apply_modifier(modifiers::UTF8_ROUND_CORNERS)
         // .set_content_arrangement(ContentArrangement::Dynamic)
-        .set_header(vec!["id", "state", "exit", "gpus", "label", "command"])
+        .set_header(vec!["id", "state", "exit", "pri", "gpus", "label", "command"])
         .add_rows(jobs.iter().map(|job| {
             let exit = job
                 .exit_code
@@ -293,6 +301,7 @@ fn print_jobs(jobs: &[Job]) -> anyhow::Result<()> {
                 job.id.to_string(),
                 job.state.as_str().to_string(),
                 exit,
+                job.priority.to_string(),
                 gpus,
                 job.label.clone().unwrap_or_default(),
                 job.command_line(),
@@ -302,7 +311,7 @@ fn print_jobs(jobs: &[Job]) -> anyhow::Result<()> {
     // Keep the table within the terminal by truncating the (last) command column.
     // When output isn't a terminal (piped/redirected), leave it untruncated.
     if let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() {
-        const COMMAND_COLUMN: usize = 5;
+        const COMMAND_COLUMN: usize = 6;
         table.fit_to_width(w as usize, COMMAND_COLUMN);
     }
 

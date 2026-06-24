@@ -14,7 +14,7 @@ use tokio::sync::{Notify, oneshot};
 
 use super::{
     protocol::{self, Request, Response},
-    scheduler::{AppState, KillOutcome, RemoveOutcome, RunResult, RunSpec},
+    scheduler::{AppState, KillOutcome, RemoveOutcome, RunResult, RunSpec, SetPriorityOutcome},
 };
 use crate::{gpu, settings::Settings};
 
@@ -106,6 +106,7 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
             label,
             cwd,
             gpus,
+            priority,
             env,
         } => {
             // Reject a request for more GPUs than exist, otherwise it would sit
@@ -118,7 +119,7 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
             }
             let id = {
                 let mut state = daemon.state.lock().unwrap();
-                let id = state.add(&daemon.settings.log_dir, argv, label, cwd, gpus, env);
+                let id = state.add(&daemon.settings.log_dir, argv, label, cwd, gpus, priority, env);
                 if let Err(e) = state.save(&daemon.settings.state_file) {
                     return Response::Error(format!("persisting state: {e}"));
                 }
@@ -164,6 +165,21 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
                 }
                 KillOutcome::AlreadyDone => Response::Error(format!("Job {id} is already finished")),
                 KillOutcome::NotFound => Response::Error(format!("No such job (id {id})")),
+            }
+        }
+        Request::SetPriority { id, priority } => {
+            let outcome = daemon.state.lock().unwrap().set_priority(id, priority);
+            match outcome {
+                SetPriorityOutcome::Updated => {
+                    persist(daemon);
+                    // A reorder may let a different queued job win the next slot.
+                    daemon.notify.notify_one();
+                    Response::Ok(format!("Set job {id} priority to {priority}"))
+                }
+                SetPriorityOutcome::NotQueued => Response::Error(format!(
+                    "Job {id} is not queued; priority only applies to queued jobs"
+                )),
+                SetPriorityOutcome::NotFound => Response::Error(format!("No such job (id {id})")),
             }
         }
         Request::Remove { id } => {
