@@ -8,12 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 client enqueues shell commands; a background daemon runs them sequentially (one at
 a time, in id order) and persists state to disk so jobs survive across runs.
 
-> **Platform status:** developed and exercised on **Windows only**. The Unix
-> code paths (`#[cfg(unix)]`: `setsid`/`killpg` whole-tree kill in
-> `process_tree.rs`, `setsid` daemon detach in `client.rs`, filesystem-socket
-> fallback) compile-gate but are **untested on Linux/macOS** — treat them as
-> unverified until someone runs the suite and a manual smoke test there. See the
-> testing checklist at the bottom of this file.
+> **Platform status:** developed primarily on Windows; the Unix code paths
+> (`#[cfg(unix)]`: `setsid`/`killpg` whole-tree kill in `process_tree.rs`,
+> `setsid` daemon detach in `client.rs`, abstract/filesystem-socket fallback)
+> have now been **verified on Linux (Arch, 2026-06-24)** — build, unit tests,
+> clippy/fmt, and the full manual checklist below all pass. Still **untested on
+> macOS** specifically (filesystem-socket fallback path). See the testing
+> checklist at the bottom of this file.
 
 ## Commands
 
@@ -183,34 +184,54 @@ runs `daemon::run`, everything else runs `client::run`.
 - `MOCHI_HOME` is the intended mechanism for test isolation: point it at a temp
   dir to get a fresh queue and socket.
 
-## Linux testing checklist (UNTESTED — see Platform status)
+## Linux testing checklist
 
-Nothing below has been run on Linux/macOS yet. Run it on a real Unix box before
-trusting the Unix paths. Use `MOCHI_HOME=$(mktemp -d)` to stay isolated.
+Verified on Arch Linux (kernel 7.0.12-arch1-1, rustc 1.96.0) on 2026-06-24, all
+via an isolated `MOCHI_HOME`. macOS is still untested — in particular the
+filesystem-socket fallback path (Linux uses the abstract-namespace socket,
+confirmed below as `@mochi-<user>.sock`).
 
-- [ ] **Compiles & unit tests:** `cargo build` and `cargo test` on Linux (the
-      `libc` dep was only added recently; `client.rs` already used `libc::setsid`,
-      so a pre-fix tree would not even build there).
-- [ ] **`clippy` / `fmt`** clean on Linux.
-- [ ] **Daemon auto-spawn & detach:** a client call spawns the daemon; it
-      survives the spawning shell closing (`setsid` path in `client.rs`).
-- [ ] **Socket:** namespaced socket on Linux, filesystem-socket fallback on
-      macOS; per-user name avoids collisions.
-- [ ] **Basic lifecycle:** `add` / `list` / `info` / `cat` / `watch` / `remove`
-      / `clear` behave as on Windows.
-- [ ] **Whole-tree kill (the core of this fix):** queue a job whose command
-      forks a child that forks again (e.g. a shell that backgrounds a `sleep`,
-      or `python` spawning a worker); `kill <id>` must terminate **every**
-      descendant. Verify with `ps -ef` / `pgrep -g <pgid>` that nothing is left
-      — this is the Unix analogue of the orphaned-python bug.
-- [ ] **`kill --all`:** stops all running + drops all queued, leaving no orphans.
-- [ ] **GPU isolation:** `CUDA_VISIBLE_DEVICES` (and AMD vars) seen by the child
-      match its `assigned_gpus`; a 0-GPU job sees an empty value (hidden from all
-      GPUs — unlike Windows, where the empty var is dropped). Use
-      `MOCHI_GPU_COUNT` to exercise without hardware.
-- [ ] **Priority:** `add -p N` and `priority <id> <n>` reorder the queue.
-- [ ] **Env capture:** a job picks up the caller's shell env (e.g. a venv/conda
-      activation) via the captured snapshot.
-- [ ] **Daemon-crash cleanup gap:** on Unix, killing the daemon does **not** reap
-      running jobs (no kill-on-close equivalent); confirm/decide whether this
-      needs a shutdown-time `killpg` sweep.
+- [x] **Compiles & unit tests:** `cargo build` and `cargo test` pass on Linux
+      (36/36 unit tests green).
+- [x] **`clippy` / `fmt`** clean on Linux (`cargo fmt --check` no diff;
+      `cargo clippy --all-targets` zero errors, only pre-existing dead-code
+      warnings plus one new one: `process_tree.rs`'s `use
+      std::os::unix::process::CommandExt` is unused because `tokio::process::Command`
+      already exposes `pre_exec` itself on Unix — harmless, worth a follow-up
+      cleanup).
+- [x] **Daemon auto-spawn & detach:** a client call spawns the daemon; a job
+      queued from a subshell that immediately exits keeps running and the
+      daemon is reparented to `systemd --user` (confirmed via `ps`), i.e. fully
+      detached from the spawning shell.
+- [x] **Socket:** abstract-namespace socket `@mochi-<user>.sock` confirmed via
+      `/proc/net/unix`; per-user naming avoids collisions. (macOS
+      filesystem-socket fallback still unverified — no macOS box available.)
+- [x] **Basic lifecycle:** `add` / `list` / `info` / `cat` / `watch` / `remove`
+      / `clear` all behave as documented (watch correctly tails the log live and
+      stops once terminal).
+- [x] **Whole-tree kill:** a job running `bash -c 'sleep 100 & sleep 100 & wait'`
+      put all 3 processes in one process group (confirmed via `ps
+      -eo pid,ppid,pgid`); `kill <id>` removed every one (`pgrep -g <pgid>`
+      empty afterward) — no orphaned grandchildren.
+- [x] **`kill --all`:** with `cpu-limit 1` forcing a running+queued mix, `kill
+      --all` killed the running job's whole tree and dropped the queued ones;
+      no orphan processes remained.
+- [x] **GPU isolation:** with `MOCHI_GPU_COUNT=2`, two `-g 1` jobs got
+      `CUDA_VISIBLE_DEVICES=0` and `=1` respectively; a 0-GPU job got an empty
+      value (correctly hidden from all GPUs, the documented Unix-vs-Windows
+      difference). `MOCHI_GPU_VENDOR=amd` also verified: jobs see
+      `HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` instead. Over-requesting GPUs
+      (`-g 5` with only 2 available) is rejected as expected.
+- [x] **Priority:** `add -p N` and `priority <id> <n>` both reorder the queue;
+      verified a job promoted via `priority` ran before a higher-id job that had
+      a lower priority (confirmed by `started` timestamps in `info`).
+- [x] **Env capture:** a job picked up a variable exported only in the calling
+      shell at `add` time, confirming the snapshot-based env capture works on
+      Unix.
+- [x] **Daemon-crash cleanup gap (confirmed, by design):** `kill -9` on the
+      daemon left its running child (`sleep 60`) orphaned — Unix process groups
+      have no kill-on-close equivalent to Windows Job Objects. On the next
+      daemon start, `AppState::load`'s reconciliation correctly flipped the
+      stale `Running` job to `Failed`. This matches the documented asymmetry; no
+      action taken (no shutdown-time `killpg` sweep added), since `shutdown` is
+      a clean exit path and crashes are rare/already reconciled on next start.
