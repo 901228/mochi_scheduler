@@ -9,7 +9,7 @@ use super::{
     protocol::{self, Request, Response},
 };
 use crate::{
-    cli::{Command, ConfigCommand},
+    cli::{Command, ConfigCommand, StateFilter},
     settings::Settings,
     utils::pretty_table::Table,
 };
@@ -19,6 +19,10 @@ pub async fn run(settings: Settings, command: Command) -> anyhow::Result<()> {
     // gets its own path instead of going through build_request/render.
     if let Command::Watch { id } = command {
         return watch(&settings, id).await;
+    }
+    // `list` filters the returned jobs client-side, so it also gets its own path.
+    if let Command::List { all, state } = command {
+        return list_jobs(&settings, all, &state).await;
     }
 
     let request = build_request(command)?;
@@ -48,7 +52,7 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
             // shell's PATH/env (pixi, venv, conda, ...) instead of the daemon's.
             env: std::env::vars().collect(),
         },
-        Command::List => Request::List,
+        Command::List { .. } => unreachable!("list is handled in run"),
         Command::Info { id } => Request::Info { id },
         Command::Cat { id } => Request::Cat { id },
         // `--all` cancels every active job; otherwise an id is required (clap
@@ -147,6 +151,64 @@ async fn fetch_job(settings: &Settings, id: u32) -> anyhow::Result<Option<Job>> 
         Response::Error(_) => Ok(None),
         other => bail!("unexpected response to info: {other:?}"),
     }
+}
+
+/// Fetch every job, filter by the requested states client-side, and print.
+///
+/// Default (no `--all`, no `--state`): running and queued jobs. `--all` shows
+/// every state; one or more `--state` show exactly those.
+async fn list_jobs(settings: &Settings, all: bool, states: &[StateFilter]) -> anyhow::Result<()> {
+    let mut conn = connect_or_spawn(settings).await?;
+    protocol::write_msg(&mut conn, &Request::List).await?;
+    let resp: Response = protocol::read_msg(&mut conn).await?;
+    drop(conn);
+
+    let jobs = match resp {
+        Response::Jobs(jobs) => jobs,
+        Response::Error(msg) => {
+            eprintln!("[ERROR] {msg}");
+            std::process::exit(1);
+        }
+        other => bail!("unexpected response to list: {other:?}"),
+    };
+
+    let filtered: Vec<Job> = jobs
+        .into_iter()
+        .filter(|job| state_wanted(all, states, &job.state))
+        .collect();
+
+    if filtered.is_empty() {
+        if all || !states.is_empty() {
+            eprintln!("(no matching jobs)");
+        } else {
+            eprintln!("(no running or queued jobs; pass --all to show every state)");
+        }
+        return Ok(());
+    }
+    print_jobs(&filtered)
+}
+
+/// Whether a job's state passes the list filter.
+fn state_wanted(all: bool, states: &[StateFilter], state: &JobState) -> bool {
+    if all {
+        return true;
+    }
+    if states.is_empty() {
+        // Default view: only the active jobs.
+        return matches!(state, JobState::Running | JobState::Queued);
+    }
+    states.iter().any(|f| filter_matches(*f, state))
+}
+
+fn filter_matches(filter: StateFilter, state: &JobState) -> bool {
+    matches!(
+        (filter, state),
+        (StateFilter::Queued, JobState::Queued)
+            | (StateFilter::Running, JobState::Running)
+            | (StateFilter::Finished, JobState::Finished)
+            | (StateFilter::Killed, JobState::Killed)
+            | (StateFilter::Failed, JobState::Failed)
+    )
 }
 
 async fn connect(settings: &Settings) -> anyhow::Result<Stream> {
@@ -340,4 +402,40 @@ fn format_gpu_list(indices: &[u32]) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!("[{joined}]")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_view_is_running_and_queued() {
+        assert!(state_wanted(false, &[], &JobState::Running));
+        assert!(state_wanted(false, &[], &JobState::Queued));
+        assert!(!state_wanted(false, &[], &JobState::Finished));
+        assert!(!state_wanted(false, &[], &JobState::Killed));
+        assert!(!state_wanted(false, &[], &JobState::Failed));
+    }
+
+    #[test]
+    fn all_shows_every_state() {
+        for s in [
+            JobState::Queued,
+            JobState::Running,
+            JobState::Finished,
+            JobState::Killed,
+            JobState::Failed,
+        ] {
+            assert!(state_wanted(true, &[], &s));
+        }
+    }
+
+    #[test]
+    fn explicit_states_filter_exactly() {
+        let filters = [StateFilter::Finished, StateFilter::Failed];
+        assert!(state_wanted(false, &filters, &JobState::Finished));
+        assert!(state_wanted(false, &filters, &JobState::Failed));
+        assert!(!state_wanted(false, &filters, &JobState::Running));
+        assert!(!state_wanted(false, &filters, &JobState::Queued));
+    }
 }

@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
 #[command(name = "msc", author, version, about, long_about = None)]
@@ -31,8 +31,16 @@ pub enum Command {
         argv: Vec<String>,
     },
 
-    /// List all jobs and their state (this is the default when no command is given).
-    List,
+    /// List jobs and their state. Shows running and queued jobs by default.
+    List {
+        /// Show jobs in every state.
+        #[arg(short, long, conflicts_with = "state")]
+        all: bool,
+
+        /// Only show jobs in these states (repeatable), e.g. `-s finished -s failed`.
+        #[arg(short, long, value_enum)]
+        state: Vec<StateFilter>,
+    },
 
     /// Show full details for a single job.
     Info {
@@ -94,6 +102,16 @@ pub enum Command {
     /// Internal: run the background daemon (not meant to be called directly).
     #[command(name = "__daemon", hide = true)]
     Daemon,
+}
+
+/// Job states that `msc list --state` can filter on. Mirrors `JobState`.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum StateFilter {
+    Queued,
+    Running,
+    Finished,
+    Killed,
+    Failed,
 }
 
 /// Settings managed under `msc config <setting>`. New daemon-wide settings go
