@@ -54,8 +54,13 @@ pub enum Command {
 
     /// Kill a running job, or drop a job that is still queued.
     Kill {
-        /// Job id.
-        id: u32,
+        /// Job id (omit when using `--all`).
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        id: Option<u32>,
+
+        /// Kill every running job and drop every queued one.
+        #[arg(long)]
+        all: bool,
     },
 
     /// Change the priority of a queued job to let it jump the queue.

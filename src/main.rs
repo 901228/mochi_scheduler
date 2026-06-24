@@ -1,6 +1,7 @@
 mod cli;
 mod gpu;
 mod ipc;
+mod process_tree;
 mod settings;
 mod utils;
 

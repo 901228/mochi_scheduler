@@ -36,6 +36,7 @@ msc cat 3                         # print job 3's captured output (stdout + stde
 msc watch 3                       # follow job 3's output live; Ctrl+C stops watching, not the job
 msc priority 3 10                 # bump a queued job's priority so it jumps the queue
 msc kill 3                        # stop a running job, or drop a queued one
+msc kill --all                    # stop every running job and drop every queued one
 msc remove 3                      # remove a finished job from the list
 msc clear                         # remove all finished/killed/failed jobs
 msc config cpu-limit 4            # cap concurrent CPU (non-GPU) jobs at 4 (0 = unlimited)
@@ -95,6 +96,16 @@ msc priority 7 -1             # or push one to the back with a lower priority
 `priority` only affects **queued** jobs — a job that has already started keeps
 running. Priority changes the *order* jobs start in, not whether a job fits: a
 high-priority GPU job still waits until enough GPUs are free.
+
+### Cancelling everything
+
+`kill <id>` stops one job; `kill --all` cancels every active job at once —
+running jobs are stopped and queued jobs are dropped. Finished/killed/failed
+jobs are left in the list (use `clear` to prune those).
+
+```bash
+msc kill --all   # stop all running jobs and clear the queue
+```
 
 ### Limiting CPU jobs
 

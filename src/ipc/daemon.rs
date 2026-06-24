@@ -16,7 +16,7 @@ use super::{
     protocol::{self, Request, Response},
     scheduler::{AppState, KillOutcome, RemoveOutcome, RunResult, RunSpec, SetPriorityOutcome},
 };
-use crate::{gpu, settings::Settings};
+use crate::{gpu, process_tree, settings::Settings};
 
 /// Shared daemon state, cloned (via Arc) into every connection handler and the scheduler.
 #[derive(Clone)]
@@ -167,6 +167,26 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
                 KillOutcome::NotFound => Response::Error(format!("No such job (id {id})")),
             }
         }
+        Request::KillAll => {
+            let outcome = daemon.state.lock().unwrap().cancel_all();
+            // Fire the kill switch for each running job; `finish` then marks it
+            // killed when its child exits, mirroring single-job `kill`.
+            {
+                let mut kills = daemon.kills.lock().unwrap();
+                for id in &outcome.running {
+                    if let Some(tx) = kills.remove(id) {
+                        let _ = tx.send(());
+                    }
+                }
+            }
+            // Persist the queued -> killed transitions right away.
+            persist(daemon);
+            Response::Ok(format!(
+                "Killed {} running and dropped {} queued job(s)",
+                outcome.running.len(),
+                outcome.dequeued
+            ))
+        }
         Request::SetPriority { id, priority } => {
             let outcome = daemon.state.lock().unwrap().set_priority(id, priority);
             match outcome {
@@ -302,6 +322,10 @@ async fn run_one(spec: &RunSpec, vendor: gpu::Vendor, kill_rx: oneshot::Receiver
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
+    // Set up whole-tree control (Unix: own process group). The Job Object is
+    // attached after spawn below.
+    process_tree::configure(&mut cmd);
+
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
@@ -310,13 +334,19 @@ async fn run_one(spec: &RunSpec, vendor: gpu::Vendor, kill_rx: oneshot::Receiver
         }
     };
 
+    // Tie the job's whole process tree to one OS handle so `kill` reaps every
+    // descendant (e.g. the python under `pixi run ... python`), not just the
+    // direct child. Held alive for the duration of the run.
+    let tree = process_tree::Guard::attach(&child);
+
     tokio::select! {
         status = child.wait() => match status {
             Ok(status) => RunResult::Exited(status.code()),
             Err(_) => RunResult::SpawnFailed,
         },
         _ = kill_rx => {
-            let _ = child.start_kill();
+            // Kill the entire tree, not just the direct child.
+            tree.kill();
             let _ = child.wait().await;
             RunResult::Killed
         }

@@ -30,3 +30,16 @@ tokio = { version = "1", features = [
     "time",
     "signal",
 ] }
+
+# Killing a job means killing its whole process tree (e.g. `pixi run ... python`),
+# which needs OS-specific primitives: a Job Object on Windows, a process group on Unix.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

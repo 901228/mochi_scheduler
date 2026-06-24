@@ -30,6 +30,8 @@ pub enum Request {
     Kill {
         id: u32,
     },
+    /// Kill every running job and drop every queued one.
+    KillAll,
     /// Change a queued job's scheduling priority.
     SetPriority {
         id: u32,

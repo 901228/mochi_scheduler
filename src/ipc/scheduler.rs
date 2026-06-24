@@ -50,6 +50,13 @@ pub enum SetPriorityOutcome {
     NotFound,
 }
 
+/// What `cancel_all` touched: the running jobs whose kill switch the daemon must
+/// still fire, and how many queued jobs were dropped.
+pub struct CancelAll {
+    pub running: Vec<u32>,
+    pub dequeued: usize,
+}
+
 /// The full in-memory state of the queue, persisted to disk as JSON.
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct AppState {
@@ -258,6 +265,28 @@ impl AppState {
             }
             Some(_) => SetPriorityOutcome::NotQueued,
         }
+    }
+
+    /// Cancel every active job: drop all queued jobs (mark them killed) and
+    /// report the running ones so the daemon can fire their kill switches. The
+    /// running jobs are transitioned to `Killed` by `finish` once their child
+    /// actually exits, mirroring single-job `kill`.
+    pub fn cancel_all(&mut self) -> CancelAll {
+        let now = Utc::now();
+        let mut running = Vec::new();
+        let mut dequeued = 0;
+        for job in self.jobs.values_mut() {
+            match job.state {
+                JobState::Running => running.push(job.id),
+                JobState::Queued => {
+                    job.state = JobState::Killed;
+                    job.finished_at = Some(now);
+                    dequeued += 1;
+                }
+                _ => {}
+            }
+        }
+        CancelAll { running, dequeued }
     }
 
     pub fn remove(&mut self, id: u32) -> RemoveOutcome {
@@ -652,6 +681,27 @@ mod tests {
 
         assert!(matches!(s.set_priority(0, 5), SetPriorityOutcome::NotQueued));
         assert!(matches!(s.set_priority(99, 5), SetPriorityOutcome::NotFound));
+    }
+
+    #[test]
+    fn cancel_all_kills_running_and_drops_queued() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a"); // 0
+        enqueue(&mut s, "b"); // 1
+        enqueue(&mut s, "c"); // 2
+        s.take_next_runnable(0); // 0 running
+        s.take_next_runnable(0); // 1 running
+        s.finish(0, RunResult::Exited(Some(0))); // 0 finished (terminal, untouched)
+
+        let outcome = s.cancel_all();
+        // Job 1 is running -> reported for the daemon to signal; not yet killed.
+        assert_eq!(outcome.running, vec![1]);
+        assert_eq!(s.get(1).unwrap().state, JobState::Running);
+        // Job 2 was queued -> dropped immediately.
+        assert_eq!(outcome.dequeued, 1);
+        assert_eq!(s.get(2).unwrap().state, JobState::Killed);
+        // The already-finished job is left as-is.
+        assert_eq!(s.get(0).unwrap().state, JobState::Finished);
     }
 
     #[test]

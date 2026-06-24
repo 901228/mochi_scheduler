@@ -8,6 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 client enqueues shell commands; a background daemon runs them sequentially (one at
 a time, in id order) and persists state to disk so jobs survive across runs.
 
+> **Platform status:** developed and exercised on **Windows only**. The Unix
+> code paths (`#[cfg(unix)]`: `setsid`/`killpg` whole-tree kill in
+> `process_tree.rs`, `setsid` daemon detach in `client.rs`, filesystem-socket
+> fallback) compile-gate but are **untested on Linux/macOS** — treat them as
+> unverified until someone runs the suite and a manual smoke test there. See the
+> testing checklist at the bottom of this file.
+
 ## Commands
 
 ```bash
@@ -43,9 +50,15 @@ one down first.
 
 ### CLI subcommands (`msc <cmd>`)
 `add [-l label] [-g N] [-p N] <argv...>`, `list`, `info <id>`, `cat <id>`,
-`watch <id>`, `kill <id>`, `priority <id> <n>`, `remove <id>`,
+`watch <id>`, `kill <id> | kill --all`, `priority <id> <n>`, `remove <id>`,
 `clear`, `config <setting>`, `shutdown`. The hidden `__daemon` subcommand runs
 the background process and is not meant to be called directly.
+
+`kill --all` cancels every *active* job at once: running jobs get their kill
+switch fired (then become `Killed` via `finish`, like single `kill`) and queued
+jobs are dropped immediately; terminal jobs are untouched (use `clear` to prune
+those). Client maps `kill --all` to `Request::KillAll`; clap requires either an
+id or `--all` and treats them as mutually exclusive.
 
 `priority <id> <n>` re-prioritises a **queued** job so it can jump the queue
 (`Request::SetPriority`); it errors on running/terminal jobs
@@ -89,7 +102,19 @@ runs `daemon::run`, everything else runs `client::run`.
   **concurrently**, not one at a time). A finishing job releases its GPUs and
   re-notifies so the scheduler backfills. Running jobs are tracked in a
   `kills: HashMap<id, oneshot::Sender>`; `kill` fires the oneshot, which a
-  `tokio::select!` in `run_one` uses to terminate the child.
+  `tokio::select!` in `run_one` uses to terminate the job.
+- **Whole-tree kill (`process_tree.rs`):** a job command is usually a *chain*
+  (`pixi run ... python`), and the process holding the RAM/GPU is a grandchild.
+  Killing only the direct child orphans it, so `run_one` ties each job to an OS
+  primitive that kills the whole tree: on Windows a **Job Object** with
+  `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (assigned via `process_tree::Guard::attach`
+  right after spawn; `kill` calls `TerminateJobObject`, and the kill-on-close flag
+  also reaps jobs if the daemon itself dies); on Unix a **process group** (the
+  child gets its own session via `setsid` in `process_tree::configure`'s
+  `pre_exec`, and `kill` sends `SIGKILL` via `killpg`). `kill` here used to be
+  `child.start_kill()`, which only terminated the direct child — the bug that
+  left python workers running. Deps: `windows-sys` (Job Objects) on Windows,
+  `libc` (setsid/killpg) on Unix, both target-gated in `Cargo.toml`.
 - **GPU scheduling (`gpu.rs` + `scheduler.rs`):** Each GPU is a resource. A job
   declares a count (`msc add --gpus N`); `AppState::take_next_runnable(total)`
   scans queued jobs and, among those that currently fit the free pool, starts the
@@ -145,3 +170,35 @@ runs `daemon::run`, everything else runs `client::run`.
   noise, not a feature.
 - `MOCHI_HOME` is the intended mechanism for test isolation: point it at a temp
   dir to get a fresh queue and socket.
+
+## Linux testing checklist (UNTESTED — see Platform status)
+
+Nothing below has been run on Linux/macOS yet. Run it on a real Unix box before
+trusting the Unix paths. Use `MOCHI_HOME=$(mktemp -d)` to stay isolated.
+
+- [ ] **Compiles & unit tests:** `cargo build` and `cargo test` on Linux (the
+      `libc` dep was only added recently; `client.rs` already used `libc::setsid`,
+      so a pre-fix tree would not even build there).
+- [ ] **`clippy` / `fmt`** clean on Linux.
+- [ ] **Daemon auto-spawn & detach:** a client call spawns the daemon; it
+      survives the spawning shell closing (`setsid` path in `client.rs`).
+- [ ] **Socket:** namespaced socket on Linux, filesystem-socket fallback on
+      macOS; per-user name avoids collisions.
+- [ ] **Basic lifecycle:** `add` / `list` / `info` / `cat` / `watch` / `remove`
+      / `clear` behave as on Windows.
+- [ ] **Whole-tree kill (the core of this fix):** queue a job whose command
+      forks a child that forks again (e.g. a shell that backgrounds a `sleep`,
+      or `python` spawning a worker); `kill <id>` must terminate **every**
+      descendant. Verify with `ps -ef` / `pgrep -g <pgid>` that nothing is left
+      — this is the Unix analogue of the orphaned-python bug.
+- [ ] **`kill --all`:** stops all running + drops all queued, leaving no orphans.
+- [ ] **GPU isolation:** `CUDA_VISIBLE_DEVICES` (and AMD vars) seen by the child
+      match its `assigned_gpus`; a 0-GPU job sees an empty value (hidden from all
+      GPUs — unlike Windows, where the empty var is dropped). Use
+      `MOCHI_GPU_COUNT` to exercise without hardware.
+- [ ] **Priority:** `add -p N` and `priority <id> <n>` reorder the queue.
+- [ ] **Env capture:** a job picks up the caller's shell env (e.g. a venv/conda
+      activation) via the captured snapshot.
+- [ ] **Daemon-crash cleanup gap:** on Unix, killing the daemon does **not** reap
+      running jobs (no kill-on-close equivalent); confirm/decide whether this
+      needs a shutdown-time `killpg` sweep.

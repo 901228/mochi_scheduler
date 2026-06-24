@@ -51,7 +51,12 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
         Command::List => Request::List,
         Command::Info { id } => Request::Info { id },
         Command::Cat { id } => Request::Cat { id },
-        Command::Kill { id } => Request::Kill { id },
+        // `--all` cancels every active job; otherwise an id is required (clap
+        // enforces this), so `id` is always `Some` here.
+        Command::Kill { all: true, .. } => Request::KillAll,
+        Command::Kill { id, all: false } => Request::Kill {
+            id: id.expect("clap requires an id without --all"),
+        },
         Command::Priority { id, priority } => Request::SetPriority { id, priority },
         Command::Remove { id } => Request::Remove { id },
         Command::Clear => Request::Clear,
