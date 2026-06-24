@@ -273,6 +273,14 @@ fn print_job_details(job: &Job) -> anyhow::Result<()> {
         .add_row(vec!["started".to_string(), started])
         .add_row(vec!["finished".to_string(), finished]);
 
+    // Wrap the value column onto multiple lines so a long command/path doesn't
+    // blow the table past the terminal width. When output isn't a terminal
+    // (piped/redirected), leave values intact on one line.
+    if let Some((terminal_size::Width(w), _)) = terminal_size::terminal_size() {
+        const VALUE_COLUMN: usize = 1;
+        table.wrap_to_width(w as usize, VALUE_COLUMN);
+    }
+
     println!("{table}");
     if job.state == JobState::Running {
         println!("(still running)");

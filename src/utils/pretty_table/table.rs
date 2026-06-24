@@ -13,10 +13,13 @@ pub struct Table {
     pub(super) rows: Vec<Vec<String>>,
 
     /// Cap the rendered table at this total width (e.g. the terminal width);
-    /// the `flex_column` is shrunk and its cells truncated with `...` to fit.
+    /// the `flex_column` is shrunk to fit, then either truncated or wrapped.
     pub(super) max_width: Option<usize>,
     /// Index of the column allowed to shrink when `max_width` would be exceeded.
     pub(super) flex_column: Option<usize>,
+    /// When set, the `flex_column`'s overflowing cells are wrapped onto multiple
+    /// lines instead of truncated with `...`.
+    pub(super) wrap: bool,
 }
 
 /// Smallest width the flex column is allowed to shrink to, so a truncated cell
@@ -39,6 +42,7 @@ impl Table {
             rows: Vec::new(),
             max_width: None,
             flex_column: None,
+            wrap: false,
         }
     }
 
@@ -47,6 +51,17 @@ impl Table {
     pub fn fit_to_width(&mut self, width: usize, column: usize) -> &mut Self {
         self.max_width = Some(width);
         self.flex_column = Some(column);
+        self.wrap = false;
+        self
+    }
+
+    /// Constrain the table to `width` columns, wrapping `column`'s cells onto
+    /// multiple lines (a cell becomes several rows of text) when the natural
+    /// layout would be wider — used by `info`, where the full value matters.
+    pub fn wrap_to_width(&mut self, width: usize, column: usize) -> &mut Self {
+        self.max_width = Some(width);
+        self.flex_column = Some(column);
+        self.wrap = true;
         self
     }
 }
@@ -174,6 +189,17 @@ impl Table {
     }
 }
 
+/// Split `s` into chunks of at most `width` characters, preserving order, so a
+/// long cell can be rendered across multiple lines. Always returns at least one
+/// (possibly empty) line.
+fn wrap_cell(s: &str, width: usize) -> Vec<String> {
+    if s.is_empty() || width == 0 {
+        return vec![s.to_string()];
+    }
+    let chars: Vec<char> = s.chars().collect();
+    chars.chunks(width).map(|c| c.iter().collect()).collect()
+}
+
 /// Truncate `s` to `width` display columns, ending with `...` when it overflows.
 fn fit_cell(s: &str, width: usize) -> String {
     if s.chars().count() <= width {
@@ -197,32 +223,38 @@ impl Table {
         content_style: &dyn StringStyle,
         content_alignment: &TextAlignment,
     ) -> std::fmt::Result {
-        write!(
-            f,
-            "{}",
-            with_style(self.frame_style.get_frame_line().straight(), &self.frame_style)
-        )?;
-        for i in 0..self.n_columns().unwrap() {
-            if i != 0 {
-                write!(
-                    f,
-                    "{}",
-                    with_style(self.frame_style.get_frame_line().straight(), &self.frame_style)
-                )?;
+        // Lay each cell out as one or more physical lines: the wrap column folds
+        // onto multiple lines, every other column truncates to a single line. A
+        // logical row is then as tall as its tallest cell, with shorter cells
+        // padded by blank continuation lines.
+        let cells: Vec<Vec<String>> = (0..self.n_columns().unwrap())
+            .map(|i| {
+                if self.wrap && self.flex_column == Some(i) {
+                    wrap_cell(&content[i], column_lens[i])
+                } else {
+                    vec![fit_cell(&content[i], column_lens[i])]
+                }
+            })
+            .collect();
+        let height = cells.iter().map(Vec::len).max().unwrap_or(1);
+
+        let bar = || with_style(self.frame_style.get_frame_line().straight(), &self.frame_style);
+        for line in 0..height {
+            write!(f, "{}", bar())?;
+            for i in 0..self.n_columns().unwrap() {
+                if i != 0 {
+                    write!(f, "{}", bar())?;
+                }
+                let max_len = column_lens[i];
+                let cell = cells[i].get(line).cloned().unwrap_or_default();
+                match content_alignment {
+                    TextAlignment::Left => write!(f, " {:<max_len$} ", with_style(cell, content_style))?,
+                    TextAlignment::Center => write!(f, " {:^max_len$} ", with_style(cell, content_style))?,
+                    TextAlignment::Right => write!(f, " {:>max_len$} ", with_style(cell, content_style))?,
+                };
             }
-            let max_len = column_lens[i];
-            let cell = fit_cell(&content[i], max_len);
-            match content_alignment {
-                TextAlignment::Left => write!(f, " {:<max_len$} ", with_style(cell, content_style))?,
-                TextAlignment::Center => write!(f, " {:^max_len$} ", with_style(cell, content_style))?,
-                TextAlignment::Right => write!(f, " {:>max_len$} ", with_style(cell, content_style))?,
-            };
+            writeln!(f, "{}", bar())?;
         }
-        writeln!(
-            f,
-            "{}",
-            with_style(self.frame_style.get_frame_line().straight(), &self.frame_style)
-        )?;
 
         Ok(())
     }
@@ -438,6 +470,51 @@ mod tests {
         let mut lens = vec![3, 40];
         t.shrink_flex_column(&mut lens);
         assert_eq!(lens, vec![3, 40]);
+    }
+
+    #[test]
+    fn wrap_cell_chunks_by_width() {
+        assert_eq!(wrap_cell("short", 10), vec!["short".to_string()]);
+        assert_eq!(
+            wrap_cell("abcdefg", 3),
+            vec!["abc".to_string(), "def".to_string(), "g".to_string()]
+        );
+        // Degenerate widths and empty input still yield one line.
+        assert_eq!(wrap_cell("", 5), vec!["".to_string()]);
+        assert_eq!(wrap_cell("abc", 0), vec!["abc".to_string()]);
+    }
+
+    #[test]
+    fn wrapped_table_stays_within_width_and_keeps_full_text() {
+        colored::control::set_override(false); // deterministic: no ANSI in assertions
+        let mut t = Table::new();
+        t.set_header(vec!["key", "value"]).add_row(vec![
+            "command".to_string(),
+            "a-very-long-command-line-that-overflows-the-width".to_string(),
+        ]);
+        t.wrap_to_width(30, 1);
+
+        let out = format!("{t}");
+        for line in out.lines() {
+            assert!(
+                line.chars().count() <= 30,
+                "line too wide ({}): {line:?}",
+                line.chars().count()
+            );
+        }
+        // Nothing is dropped: stripping the frame/padding recovers every chunk.
+        assert!(!out.contains(ELLIPSIS), "wrap mode must not truncate:\n{out}");
+        let joined: String = out
+            .lines()
+            .filter(|l| l.contains('│'))
+            .flat_map(|l| l.split('│'))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            joined.contains("a-very-long-command-line-that-overflows-the-width"),
+            "expected the full value to survive wrapping:\n{out}"
+        );
     }
 
     #[test]
