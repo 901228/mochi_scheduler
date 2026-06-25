@@ -54,10 +54,13 @@ pub enum Command {
         id: u32,
     },
 
-    /// Follow a job's output live. Press Ctrl+C to stop watching; the job keeps running.
+    /// Follow a running job's output live. Press Ctrl+C to stop watching; the job keeps running.
+    ///
+    /// Only running jobs can be watched. Omit the id to watch the sole running
+    /// job, or to list the running jobs to choose from when there are several.
     Watch {
-        /// Job id.
-        id: u32,
+        /// Job id. Omit to auto-pick / list the running jobs.
+        id: Option<u32>,
     },
 
     /// Kill a running job, or drop a job that is still queued.

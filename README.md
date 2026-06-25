@@ -33,7 +33,8 @@ msc add -p 10 -- ./urgent.sh      # queue at higher priority so it runs before n
 msc list                          # running + queued jobs (use --all or --state for others)
 msc info 3                        # full details for job 3
 msc cat 3                         # print job 3's captured output (stdout + stderr)
-msc watch 3                       # follow job 3's output live; Ctrl+C stops watching, not the job
+msc watch 3                       # follow a running job's output live; Ctrl+C stops watching, not the job
+msc watch                         # watch the sole running job, or list the running jobs to choose from
 msc priority 3 10                 # bump a queued job's priority so it jumps the queue
 msc rerun 3                       # re-queue a fresh copy of job 3 (same command, dir, env)
 msc kill 3                        # stop a running job, or drop a queued one

@@ -77,18 +77,28 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
     })
 }
 
-/// Follow a job's output live (like `tail -f`) until it reaches a terminal
-/// state or the user presses Ctrl+C.
+/// Follow a *running* job's output live (like `tail -f`) until it reaches a
+/// terminal state or the user presses Ctrl+C.
+///
+/// Watching only makes sense for a running job — a terminal job's output is
+/// complete (use `cat` for that), so we refuse to "follow" one rather than
+/// dumping its whole log. With no id we auto-pick the sole running job, or list
+/// the running jobs when there is more than one.
 ///
 /// Ctrl+C only stops watching — the job keeps running, because it is a child of
 /// the daemon, not of this client process. `Info` already returns the job's log
 /// path and state, so we poll it and stream new bytes from the log file.
-async fn watch(settings: &Settings, id: u32) -> anyhow::Result<()> {
-    // Fail fast with a clear error if the job doesn't exist.
-    if fetch_job(settings, id).await?.is_none() {
-        eprintln!("[ERROR] No such job (id {id})");
-        std::process::exit(1);
-    }
+async fn watch(settings: &Settings, id: Option<u32>) -> anyhow::Result<()> {
+    let id = match id {
+        Some(id) => match resolve_watch_target(settings, id).await? {
+            Some(id) => id,
+            None => return Ok(()),
+        },
+        None => match pick_running_job(settings).await? {
+            Some(id) => id,
+            None => return Ok(()),
+        },
+    };
 
     tokio::select! {
         res = follow(settings, id) => res,
@@ -96,6 +106,51 @@ async fn watch(settings: &Settings, id: u32) -> anyhow::Result<()> {
             println!();
             eprintln!("(stopped watching job {id}; it keeps running)");
             Ok(())
+        }
+    }
+}
+
+/// Validate an explicitly requested watch target. Returns `Some(id)` only when
+/// the job exists and is currently running; otherwise prints an error/warning
+/// and returns `None` (exiting for a missing job).
+async fn resolve_watch_target(settings: &Settings, id: u32) -> anyhow::Result<Option<u32>> {
+    let Some(job) = fetch_job(settings, id).await? else {
+        eprintln!("[ERROR] No such job (id {id})");
+        std::process::exit(1);
+    };
+    if job.state != JobState::Running {
+        eprintln!(
+            "[WARN] job {id} is {}, not running; watch only follows running jobs.",
+            job.state.as_str()
+        );
+        if job.state.is_terminal() {
+            eprintln!("(use `msc cat {id}` to see its captured output)");
+        }
+        return Ok(None);
+    }
+    Ok(Some(job.id))
+}
+
+/// Pick a running job to watch when no id is given: the sole running job if
+/// there is exactly one, otherwise print the running jobs (or a notice when
+/// there are none) and return `None`.
+async fn pick_running_job(settings: &Settings) -> anyhow::Result<Option<u32>> {
+    let running: Vec<Job> = fetch_all_jobs(settings)
+        .await?
+        .into_iter()
+        .filter(|job| job.state == JobState::Running)
+        .collect();
+
+    match running.as_slice() {
+        [] => {
+            eprintln!("(no running jobs to watch)");
+            Ok(None)
+        }
+        [job] => Ok(Some(job.id)),
+        _ => {
+            eprintln!("Multiple running jobs; watch one with `msc watch <id>`:");
+            print_jobs(&running)?;
+            Ok(None)
         }
     }
 }
@@ -154,26 +209,30 @@ async fn fetch_job(settings: &Settings, id: u32) -> anyhow::Result<Option<Job>> 
     }
 }
 
-/// Fetch every job, filter by the requested states client-side, and print.
-///
-/// Default (no `--all`, no `--state`): running and queued jobs. `--all` shows
-/// every state; one or more `--state` show exactly those.
-async fn list_jobs(settings: &Settings, all: bool, states: &[StateFilter]) -> anyhow::Result<()> {
+/// Fetch every job from the daemon via a `List` request.
+async fn fetch_all_jobs(settings: &Settings) -> anyhow::Result<Vec<Job>> {
     let mut conn = connect_or_spawn(settings).await?;
     protocol::write_msg(&mut conn, &Request::List).await?;
     let resp: Response = protocol::read_msg(&mut conn).await?;
     drop(conn);
 
-    let jobs = match resp {
-        Response::Jobs(jobs) => jobs,
+    match resp {
+        Response::Jobs(jobs) => Ok(jobs),
         Response::Error(msg) => {
             eprintln!("[ERROR] {msg}");
             std::process::exit(1);
         }
         other => bail!("unexpected response to list: {other:?}"),
-    };
+    }
+}
 
-    let filtered: Vec<Job> = jobs
+/// Fetch every job, filter by the requested states client-side, and print.
+///
+/// Default (no `--all`, no `--state`): running and queued jobs. `--all` shows
+/// every state; one or more `--state` show exactly those.
+async fn list_jobs(settings: &Settings, all: bool, states: &[StateFilter]) -> anyhow::Result<()> {
+    let filtered: Vec<Job> = fetch_all_jobs(settings)
+        .await?
         .into_iter()
         .filter(|job| state_wanted(all, states, &job.state))
         .collect();

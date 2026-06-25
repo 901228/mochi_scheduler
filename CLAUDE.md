@@ -51,7 +51,7 @@ one down first.
 
 ### CLI subcommands (`msc <cmd>`)
 `add [-l label] [-g N] [-p N] <argv...>`, `list [-a|--all] [-s|--state S]...`,
-`info <id>`, `cat <id>`, `watch <id>`, `kill <id> | kill --all`,
+`info <id>`, `cat <id>`, `watch [<id>]`, `kill <id> | kill --all`,
 `priority <id> <n>`, `rerun <id>`, `remove <id>`, `clear`, `config <setting>`,
 `shutdown`. The hidden `__daemon` subcommand runs the background process and is
 not meant to be called directly.
@@ -94,6 +94,13 @@ together; add new settings as `ConfigCommand` variants. Currently:
 the log file, polling until the job is terminal. Ctrl+C (via
 `tokio::signal::ctrl_c`) stops the watch but not the job — the job is the
 daemon's child, not the client's, so the client never has a way to signal it.
+It **only follows running jobs**: an explicit id that is queued/terminal prints
+a `[WARN]` (with a `cat` hint for terminal jobs) and refuses to dump the
+finished log; a missing id is an `[ERROR]`. The id is optional
+(`Watch { id: Option<u32> }`) — with no id, `pick_running_job` auto-selects the
+sole running job, or lists the running jobs (via `print_jobs`) when there are
+several, or reports none. The id-less / list paths reuse `fetch_all_jobs` (a
+`List` request), the same helper `list` now uses.
 
 ## Architecture
 
