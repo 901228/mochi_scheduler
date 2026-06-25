@@ -200,12 +200,6 @@ via an isolated `MOCHI_HOME`. macOS is still untested — in particular the
 filesystem-socket fallback path (Linux uses the abstract-namespace socket,
 confirmed below as `@mochi-<user>.sock`).
 
-> **Not yet re-verified on Linux:** the `watch` restriction added 2026-06-25
-> (running-only + optional id; commit after this pass) post-dates the run above
-> and has only been exercised on Windows. It's pure client-side logic with no
-> `#[cfg]` branches, so it's expected to behave identically — see the unchecked
-> item below.
-
 - [x] **Compiles & unit tests:** `cargo build` and `cargo test` pass on Linux
       (36/36 unit tests green).
 - [x] **`clippy` / `fmt`** clean on Linux (`cargo fmt --check` no diff;
@@ -223,14 +217,17 @@ confirmed below as `@mochi-<user>.sock`).
       filesystem-socket fallback still unverified — no macOS box available.)
 - [x] **Basic lifecycle:** `add` / `list` / `info` / `cat` / `watch` / `remove`
       / `clear` all behave as documented (watch correctly tails the log live and
-      stops once terminal). *(Covers the old always-tail `watch`; the new
-      running-only/optional-id behavior is the unchecked item below.)*
-- [ ] **`watch` running-only + optional id (added 2026-06-25, Windows-only so
-      far):** `watch <id>` on a queued/terminal job warns and refuses to dump
-      the log (with a `cat` hint for terminal jobs); a missing id errors. With
-      no id, `watch` auto-picks the sole running job, lists the running jobs
-      when there are several, and reports none when idle. Pure client-side
-      logic, no `#[cfg]`, so expected to match Windows.
+      stops once terminal).
+- [x] **`watch` running-only + optional id (verified 2026-06-25):** `watch <id>`
+      on a queued job prints `[WARN]` and refuses; on a terminal job (finished or
+      killed) prints `[WARN]` plus a `msc cat <id>` hint; a nonexistent id prints
+      `[ERROR]`. With no id: auto-picks the sole running job and tails it; lists
+      running jobs (via `print_jobs`) when there are several; prints `(no running
+      jobs to watch)` when idle. All six cases confirmed on Linux (pure
+      client-side logic, tested against the installed daemon).
+- [x] **`rerun` (verified 2026-06-25):** `rerun <id>` creates a new queued job
+      copying argv, label, and priority from the source; source job record is
+      left untouched. Verified for a finished job and for a running job.
 - [x] **Whole-tree kill:** a job running `bash -c 'sleep 100 & sleep 100 & wait'`
       put all 3 processes in one process group (confirmed via `ps
       -eo pid,ppid,pgid`); `kill <id>` removed every one (`pgrep -g <pgid>`
