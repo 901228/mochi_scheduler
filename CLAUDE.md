@@ -12,7 +12,9 @@ a time, in id order) and persists state to disk so jobs survive across runs.
 > (`#[cfg(unix)]`: `setsid`/`killpg` whole-tree kill in `process_tree.rs`,
 > `setsid` daemon detach in `client.rs`, abstract/filesystem-socket fallback)
 > have now been **verified on Linux (Arch, 2026-06-24)** — build, unit tests,
-> clippy/fmt, and the full manual checklist below all pass. Still **untested on
+> clippy/fmt, and the full manual checklist below all pass. The `watch`
+> running-only/optional-id change (2026-06-25) post-dates that pass and is so
+> far **Windows-only tested** (client-side, no `#[cfg]`). Still **untested on
 > macOS** specifically (filesystem-socket fallback path). See the testing
 > checklist at the bottom of this file.
 
@@ -198,6 +200,12 @@ via an isolated `MOCHI_HOME`. macOS is still untested — in particular the
 filesystem-socket fallback path (Linux uses the abstract-namespace socket,
 confirmed below as `@mochi-<user>.sock`).
 
+> **Not yet re-verified on Linux:** the `watch` restriction added 2026-06-25
+> (running-only + optional id; commit after this pass) post-dates the run above
+> and has only been exercised on Windows. It's pure client-side logic with no
+> `#[cfg]` branches, so it's expected to behave identically — see the unchecked
+> item below.
+
 - [x] **Compiles & unit tests:** `cargo build` and `cargo test` pass on Linux
       (36/36 unit tests green).
 - [x] **`clippy` / `fmt`** clean on Linux (`cargo fmt --check` no diff;
@@ -215,7 +223,14 @@ confirmed below as `@mochi-<user>.sock`).
       filesystem-socket fallback still unverified — no macOS box available.)
 - [x] **Basic lifecycle:** `add` / `list` / `info` / `cat` / `watch` / `remove`
       / `clear` all behave as documented (watch correctly tails the log live and
-      stops once terminal).
+      stops once terminal). *(Covers the old always-tail `watch`; the new
+      running-only/optional-id behavior is the unchecked item below.)*
+- [ ] **`watch` running-only + optional id (added 2026-06-25, Windows-only so
+      far):** `watch <id>` on a queued/terminal job warns and refuses to dump
+      the log (with a `cat` hint for terminal jobs); a missing id errors. With
+      no id, `watch` auto-picks the sole running job, lists the running jobs
+      when there are several, and reports none when idle. Pure client-side
+      logic, no `#[cfg]`, so expected to match Windows.
 - [x] **Whole-tree kill:** a job running `bash -c 'sleep 100 & sleep 100 & wait'`
       put all 3 processes in one process group (confirmed via `ps
       -eo pid,ppid,pgid`); `kill <id>` removed every one (`pgrep -g <pgid>`
