@@ -349,7 +349,9 @@ async fn fetch_all_jobs(settings: &Settings) -> anyhow::Result<Vec<Job>> {
 ///
 /// Default (no `--all`, no `--state`): running and queued jobs. `--all` shows
 /// every state; one or more `--state` show exactly those.
-/// Jobs are sorted by execution order unless `by_id` is true.
+/// Jobs are sorted by execution order for the default active-jobs view only.
+/// --all and --state views keep id order (chronological, natural for history).
+/// --by-id overrides to id order for the default view.
 async fn list_jobs(settings: &Settings, all: bool, states: &[StateFilter], by_id: bool) -> anyhow::Result<()> {
     let mut filtered: Vec<Job> = fetch_all_jobs(settings)
         .await?
@@ -357,7 +359,7 @@ async fn list_jobs(settings: &Settings, all: bool, states: &[StateFilter], by_id
         .filter(|job| state_wanted(all, states, &job.state))
         .collect();
 
-    if !by_id {
+    if !by_id && !all && states.is_empty() {
         filtered.sort_by_key(execution_order_key);
     }
 

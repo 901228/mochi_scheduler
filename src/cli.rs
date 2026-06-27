@@ -33,9 +33,9 @@ pub enum Command {
 
     /// List jobs and their state. Shows running and queued jobs by default.
     ///
-    /// Jobs are sorted by execution order: running first, then queued jobs in
-    /// priority order (highest first), then terminal jobs. Use `--by-id` to
-    /// sort by id instead.
+    /// The default view sorts by execution order: running first, then queued
+    /// jobs in priority order (highest first). Use `--by-id` to sort by id
+    /// instead. `--all` and `--state` views always use id order.
     List {
         /// Show jobs in every state.
         #[arg(short, long, conflicts_with = "state")]
@@ -45,7 +45,7 @@ pub enum Command {
         #[arg(short, long, value_enum)]
         state: Vec<StateFilter>,
 
-        /// Sort by id instead of by execution order.
+        /// Sort by id instead of execution order (only affects the default active-jobs view).
         #[arg(long)]
         by_id: bool,
     },
