@@ -116,6 +116,9 @@ pub enum Command {
     /// Remove all finished/killed/failed jobs from the list.
     Clear,
 
+    /// Show the GPU devices detected by the daemon at startup.
+    Devices,
+
     /// View or change daemon settings.
     Config {
         #[command(subcommand)]

@@ -246,6 +246,10 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
             }
             Response::Ok(format!("Cleared {removed} finished jobs"))
         }
+        Request::GetDevices => {
+            let free = daemon.state.lock().unwrap().free_gpu_count(daemon.gpu.count);
+            Response::Ok(describe_devices(&daemon.gpu, free))
+        }
         Request::GetCpuLimit => {
             let limit = daemon.state.lock().unwrap().cpu_limit();
             Response::Ok(format!("CPU job limit: {}", describe_cpu_limit(limit)))
@@ -271,6 +275,22 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
             Response::Ok("Shutting down".into())
         }
     }
+}
+
+fn describe_devices(gpu: &gpu::GpuInfo, free: u32) -> String {
+    if gpu.count == 0 {
+        return "No GPUs detected".to_string();
+    }
+    let vendor = match gpu.vendor {
+        gpu::Vendor::Nvidia => "NVIDIA",
+        gpu::Vendor::Amd => "AMD",
+        gpu::Vendor::None => "none",
+    };
+    let env_vars = gpu.vendor.visible_devices_env().join(", ");
+    format!(
+        "Vendor: {vendor}\nTotal:  {total}\nFree:   {free}/{total}\nEnv:    {env_vars}",
+        total = gpu.count,
+    )
 }
 
 /// Human-readable form of a CPU-job limit for command replies.

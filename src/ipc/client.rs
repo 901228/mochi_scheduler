@@ -58,6 +58,7 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
         Command::Rerun { .. } => unreachable!("rerun is handled in run"),
         Command::Remove { id } => Request::Remove { id },
         Command::Clear => Request::Clear,
+        Command::Devices => Request::GetDevices,
         Command::Config { setting } => match setting {
             // No argument -> query; a number sets it, with 0 meaning unlimited.
             ConfigCommand::CpuLimit { limit: None } => Request::GetCpuLimit,

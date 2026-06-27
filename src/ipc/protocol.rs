@@ -46,6 +46,8 @@ pub enum Request {
     },
     Clear,
     Shutdown,
+    /// Query the GPU devices detected by the daemon at startup.
+    GetDevices,
     /// Read the current CPU-job concurrency limit.
     GetCpuLimit,
     /// Set the CPU-job concurrency limit (`None` = unlimited).

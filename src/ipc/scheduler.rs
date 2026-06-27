@@ -176,6 +176,10 @@ impl AppState {
         free
     }
 
+    pub fn free_gpu_count(&self, gpu_total: u32) -> u32 {
+        self.free_gpus(gpu_total).len() as u32
+    }
+
     /// Number of CPU (0-GPU) jobs currently running, used to enforce `cpu_limit`.
     fn running_cpu_count(&self) -> u32 {
         self.jobs
