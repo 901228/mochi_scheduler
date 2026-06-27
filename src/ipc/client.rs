@@ -1,4 +1,4 @@
-use std::{process::Stdio, time::Duration};
+use std::{collections::BTreeSet, process::Stdio, time::Duration};
 
 use anyhow::{Context, bail};
 // use comfy_table::{CellAlignment, ContentArrangement, Table, modifiers, presets};
@@ -15,24 +15,21 @@ use crate::{
 };
 
 pub async fn run(settings: Settings, command: Command) -> anyhow::Result<()> {
-    // `watch` is not a single request/response: it polls and tails a log, so it
-    // gets its own path instead of going through build_request/render.
-    if let Command::Watch { id } = command {
-        return watch(&settings, id).await;
+    match command {
+        Command::Watch { id } => watch(&settings, id).await,
+        Command::List { all, state, by_id } => list_jobs(&settings, all, &state, by_id).await,
+        Command::Kill { ids, all: false } => kill_many(&settings, &ids).await,
+        Command::Priority { args } => set_priority_many(&settings, &args).await,
+        Command::Rerun { ids } => rerun_many(&settings, &ids).await,
+        command => {
+            let request = build_request(command)?;
+            let mut conn = connect_or_spawn(&settings).await?;
+            protocol::write_msg(&mut conn, &request).await?;
+            let response: Response = protocol::read_msg(&mut conn).await?;
+            drop(conn);
+            render(response).await
+        }
     }
-    // `list` filters the returned jobs client-side, so it also gets its own path.
-    if let Command::List { all, state } = command {
-        return list_jobs(&settings, all, &state).await;
-    }
-
-    let request = build_request(command)?;
-    let mut conn = connect_or_spawn(&settings).await?;
-    protocol::write_msg(&mut conn, &request).await?;
-    let response: Response = protocol::read_msg(&mut conn).await?;
-
-    drop(conn);
-
-    render(response).await
 }
 
 fn build_request(command: Command) -> anyhow::Result<Request> {
@@ -55,14 +52,10 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
         Command::List { .. } => unreachable!("list is handled in run"),
         Command::Info { id } => Request::Info { id },
         Command::Cat { id } => Request::Cat { id },
-        // `--all` cancels every active job; otherwise an id is required (clap
-        // enforces this), so `id` is always `Some` here.
         Command::Kill { all: true, .. } => Request::KillAll,
-        Command::Kill { id, all: false } => Request::Kill {
-            id: id.expect("clap requires an id without --all"),
-        },
-        Command::Priority { id, priority } => Request::SetPriority { id, priority },
-        Command::Rerun { id } => Request::Rerun { id },
+        Command::Kill { .. } => unreachable!("kill with ids is handled in run"),
+        Command::Priority { .. } => unreachable!("priority is handled in run"),
+        Command::Rerun { .. } => unreachable!("rerun is handled in run"),
         Command::Remove { id } => Request::Remove { id },
         Command::Clear => Request::Clear,
         Command::Config { setting } => match setting {
@@ -75,6 +68,132 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
         Command::Watch { .. } => unreachable!("watch is handled in run"),
         Command::Daemon => unreachable!("daemon is dispatched in main"),
     })
+}
+
+/// Expand a slice of id args (plain numbers or `start-end` ranges) into a
+/// sorted, deduplicated list of job ids.
+fn parse_job_ids(args: &[String]) -> anyhow::Result<Vec<u32>> {
+    let mut ids: Vec<u32> = Vec::new();
+    let mut seen = BTreeSet::new();
+    for arg in args {
+        if let Some((start, end)) = arg.split_once('-') {
+            let a: u32 = start
+                .parse()
+                .with_context(|| format!("invalid id in range '{arg}'"))?;
+            let b: u32 = end
+                .parse()
+                .with_context(|| format!("invalid id in range '{arg}'"))?;
+            if a > b {
+                bail!("invalid range '{arg}': start ({a}) is greater than end ({b})");
+            }
+            for id in a..=b {
+                if seen.insert(id) {
+                    ids.push(id);
+                }
+            }
+        } else {
+            let id: u32 = arg
+                .parse()
+                .with_context(|| format!("'{arg}' is not a valid job id"))?;
+            if seen.insert(id) {
+                ids.push(id);
+            }
+        }
+    }
+    Ok(ids)
+}
+
+/// Kill multiple jobs by id, continuing past errors and printing each result.
+async fn kill_many(settings: &Settings, id_args: &[String]) -> anyhow::Result<()> {
+    let ids = parse_job_ids(id_args)?;
+    let mut had_error = false;
+    for id in ids {
+        let mut conn = connect_or_spawn(settings).await?;
+        protocol::write_msg(&mut conn, &Request::Kill { id }).await?;
+        let resp: Response = protocol::read_msg(&mut conn).await?;
+        drop(conn);
+        match resp {
+            Response::Ok(msg) => println!("{msg}"),
+            Response::Error(msg) => {
+                eprintln!("[ERROR] {msg}");
+                had_error = true;
+            }
+            other => bail!("unexpected response to kill: {other:?}"),
+        }
+    }
+    if had_error {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Change the priority of multiple jobs. `args` must have at least 2 elements;
+/// the last is the priority value and all preceding elements are job ids.
+async fn set_priority_many(settings: &Settings, args: &[String]) -> anyhow::Result<()> {
+    // Enforced by clap (num_args = 2..), but guard defensively.
+    assert!(args.len() >= 2, "priority requires at least one id and a priority value");
+
+    let priority_str = args.last().unwrap();
+    let priority: i32 = priority_str.parse().with_context(|| {
+        format!("'{priority_str}' is not a valid priority value (expected integer)")
+    })?;
+    let ids = parse_job_ids(&args[..args.len() - 1])?;
+
+    let mut had_error = false;
+    for id in ids {
+        let mut conn = connect_or_spawn(settings).await?;
+        protocol::write_msg(&mut conn, &Request::SetPriority { id, priority }).await?;
+        let resp: Response = protocol::read_msg(&mut conn).await?;
+        drop(conn);
+        match resp {
+            Response::Ok(msg) => println!("{msg}"),
+            Response::Error(msg) => {
+                eprintln!("[ERROR] {msg}");
+                had_error = true;
+            }
+            other => bail!("unexpected response to set-priority: {other:?}"),
+        }
+    }
+    if had_error {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Re-run multiple jobs by id, continuing past errors and printing each result.
+async fn rerun_many(settings: &Settings, id_args: &[String]) -> anyhow::Result<()> {
+    let ids = parse_job_ids(id_args)?;
+    let mut had_error = false;
+    for id in ids {
+        let mut conn = connect_or_spawn(settings).await?;
+        protocol::write_msg(&mut conn, &Request::Rerun { id }).await?;
+        let resp: Response = protocol::read_msg(&mut conn).await?;
+        drop(conn);
+        match resp {
+            Response::Ok(msg) => println!("{msg}"),
+            Response::Error(msg) => {
+                eprintln!("[ERROR] {msg}");
+                had_error = true;
+            }
+            other => bail!("unexpected response to rerun: {other:?}"),
+        }
+    }
+    if had_error {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Sort key for execution-order listing:
+///   running jobs  (group 0) — by id
+///   queued jobs   (group 1) — by descending priority then id (matches scheduler)
+///   terminal jobs (group 2) — by id
+fn execution_order_key(job: &Job) -> (u8, i64, u32) {
+    match job.state {
+        JobState::Running => (0, 0, job.id),
+        JobState::Queued => (1, -(job.priority as i64), job.id),
+        _ => (2, 0, job.id),
+    }
 }
 
 /// Follow a *running* job's output live (like `tail -f`) until it reaches a
@@ -230,12 +349,17 @@ async fn fetch_all_jobs(settings: &Settings) -> anyhow::Result<Vec<Job>> {
 ///
 /// Default (no `--all`, no `--state`): running and queued jobs. `--all` shows
 /// every state; one or more `--state` show exactly those.
-async fn list_jobs(settings: &Settings, all: bool, states: &[StateFilter]) -> anyhow::Result<()> {
-    let filtered: Vec<Job> = fetch_all_jobs(settings)
+/// Jobs are sorted by execution order unless `by_id` is true.
+async fn list_jobs(settings: &Settings, all: bool, states: &[StateFilter], by_id: bool) -> anyhow::Result<()> {
+    let mut filtered: Vec<Job> = fetch_all_jobs(settings)
         .await?
         .into_iter()
         .filter(|job| state_wanted(all, states, &job.state))
         .collect();
+
+    if !by_id {
+        filtered.sort_by_key(execution_order_key);
+    }
 
     if filtered.is_empty() {
         if all || !states.is_empty() {
@@ -500,5 +624,35 @@ mod tests {
         assert!(state_wanted(false, &filters, &JobState::Failed));
         assert!(!state_wanted(false, &filters, &JobState::Running));
         assert!(!state_wanted(false, &filters, &JobState::Queued));
+    }
+
+    #[test]
+    fn parse_job_ids_handles_singles_ranges_and_dedup() {
+        let s = |x: &str| x.to_string();
+
+        assert_eq!(parse_job_ids(&[s("5")]).unwrap(), vec![5]);
+        assert_eq!(parse_job_ids(&[s("3-5")]).unwrap(), vec![3, 4, 5]);
+        assert_eq!(parse_job_ids(&[s("0-0")]).unwrap(), vec![0]);
+
+        // overlapping: 4 appears in the range and again explicitly — deduplicated
+        assert_eq!(
+            parse_job_ids(&[s("3-5"), s("4"), s("7")]).unwrap(),
+            vec![3, 4, 5, 7]
+        );
+
+        // multiple ranges
+        assert_eq!(
+            parse_job_ids(&[s("1-2"), s("5-6")]).unwrap(),
+            vec![1, 2, 5, 6]
+        );
+    }
+
+    #[test]
+    fn parse_job_ids_rejects_bad_input() {
+        let s = |x: &str| x.to_string();
+
+        assert!(parse_job_ids(&[s("5-3")]).is_err()); // start > end
+        assert!(parse_job_ids(&[s("abc")]).is_err()); // not a number
+        assert!(parse_job_ids(&[s("1-abc")]).is_err()); // bad range end
     }
 }

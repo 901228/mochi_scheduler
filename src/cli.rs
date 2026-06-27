@@ -32,6 +32,10 @@ pub enum Command {
     },
 
     /// List jobs and their state. Shows running and queued jobs by default.
+    ///
+    /// Jobs are sorted by execution order: running first, then queued jobs in
+    /// priority order (highest first), then terminal jobs. Use `--by-id` to
+    /// sort by id instead.
     List {
         /// Show jobs in every state.
         #[arg(short, long, conflicts_with = "state")]
@@ -40,6 +44,10 @@ pub enum Command {
         /// Only show jobs in these states (repeatable), e.g. `-s finished -s failed`.
         #[arg(short, long, value_enum)]
         state: Vec<StateFilter>,
+
+        /// Sort by id instead of by execution order.
+        #[arg(long)]
+        by_id: bool,
     },
 
     /// Show full details for a single job.
@@ -63,31 +71,40 @@ pub enum Command {
         id: Option<u32>,
     },
 
-    /// Kill a running job, or drop a job that is still queued.
+    /// Kill one or more running jobs, or drop jobs that are still queued.
+    ///
+    /// Accepts multiple ids and ranges, e.g. `msc kill 12 15-18`.
     Kill {
-        /// Job id (omit when using `--all`).
-        #[arg(required_unless_present = "all", conflicts_with = "all")]
-        id: Option<u32>,
+        /// Job id(s) to kill. Accepts ranges like `12-15` (kills 12, 13, 14, 15).
+        /// Omit when using `--all`.
+        #[arg(required_unless_present = "all", conflicts_with = "all", num_args = 1..)]
+        ids: Vec<String>,
 
         /// Kill every running job and drop every queued one.
         #[arg(long)]
         all: bool,
     },
 
-    /// Change the priority of a queued job to let it jump the queue.
+    /// Change the priority of one or more queued jobs to let them jump the queue.
+    ///
+    /// Usage: `msc priority <id(s)> <new-priority>`. The last argument is the
+    /// priority value; all preceding arguments are job ids (ranges accepted).
+    /// Example: `msc priority 12 15-18 10` sets jobs 12, 15-18 to priority 10.
     Priority {
-        /// Job id.
-        id: u32,
-
-        /// New priority; higher runs first (default 0).
-        #[arg(allow_hyphen_values = true)]
-        priority: i32,
+        /// Job id(s) followed by the new priority. The last argument is the
+        /// priority value (integer); all preceding arguments are job ids
+        /// (ranges like `12-15` are accepted).
+        #[arg(required = true, num_args = 2.., allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 
-    /// Re-run a job: queue a fresh copy of it (same command, dir, and environment).
+    /// Re-run one or more jobs: queue a fresh copy (same command, dir, and environment).
+    ///
+    /// Accepts multiple ids and ranges, e.g. `msc rerun 12 15-18`.
     Rerun {
-        /// Job id to re-run.
-        id: u32,
+        /// Job id(s) to re-run. Accepts ranges like `12-15`.
+        #[arg(required = true, num_args = 1..)]
+        ids: Vec<String>,
     },
 
     /// Remove a finished or queued job from the list.

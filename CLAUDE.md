@@ -12,11 +12,11 @@ a time, in id order) and persists state to disk so jobs survive across runs.
 > (`#[cfg(unix)]`: `setsid`/`killpg` whole-tree kill in `process_tree.rs`,
 > `setsid` daemon detach in `client.rs`, abstract/filesystem-socket fallback)
 > have now been **verified on Linux (Arch, 2026-06-24)** — build, unit tests,
-> clippy/fmt, and the full manual checklist below all pass. The `watch`
-> running-only/optional-id change (2026-06-25) post-dates that pass and is so
-> far **Windows-only tested** (client-side, no `#[cfg]`). Still **untested on
-> macOS** specifically (filesystem-socket fallback path). See the testing
-> checklist at the bottom of this file.
+> clippy/fmt, and the full manual checklist below all pass. Still **untested on
+> macOS** specifically (filesystem-socket fallback path). The features added
+> 2026-06-28 (multi-id `kill`/`priority`/`rerun` with range syntax; execution-order
+> `list` sort + `--by-id` flag) are **Linux-verified, Windows-not-yet-tested**
+> (all pure client-side logic, no `#[cfg]` branches). See the testing checklist.
 
 ## Commands
 
@@ -52,18 +52,27 @@ so `MOCHI_HOME` alone won't spin up a second, isolated daemon — shut the runni
 one down first.
 
 ### CLI subcommands (`msc <cmd>`)
-`add [-l label] [-g N] [-p N] <argv...>`, `list [-a|--all] [-s|--state S]...`,
-`info <id>`, `cat <id>`, `watch [<id>]`, `kill <id> | kill --all`,
-`priority <id> <n>`, `rerun <id>`, `remove <id>`, `clear`, `config <setting>`,
+`add [-l label] [-g N] [-p N] <argv...>`, `list [-a|--all] [-s|--state S]... [--by-id]`,
+`info <id>`, `cat <id>`, `watch [<id>]`, `kill <ids...> | kill --all`,
+`priority <ids...> <n>`, `rerun <ids...>`, `remove <id>`, `clear`, `config <setting>`,
 `shutdown`. The hidden `__daemon` subcommand runs the background process and is
 not meant to be called directly.
 
 `list` shows running and queued jobs by default; `--all` shows every state and
 `--state <S>` (repeatable, mutually exclusive with `--all`) shows exactly those
-states. Filtering is **client-side** (the daemon still returns all jobs), so the
-`List` protocol is unchanged.
+states. Jobs are sorted by **execution order** (running first, then queued jobs in
+priority order matching the scheduler, then terminal jobs); `--by-id` reverts to
+the old id-order. Filtering and sorting are **client-side** (the daemon still
+returns all jobs), so the `List` protocol is unchanged.
 
-`rerun <id>` re-queues an existing job as a brand-new job (new id, new log),
+`kill`, `priority`, and `rerun` all accept **multiple ids and ranges**: plain
+numbers (`12 13 14`) or `start-end` ranges (`12-15` expands to 12, 13, 14, 15),
+or a mix (`12 15-18`). Duplicates are silently deduplicated. Each id is processed
+independently — errors are printed but processing continues for the remaining ids.
+Client-side `parse_job_ids` expands the id args before sending individual
+requests; no protocol change.
+
+`rerun <ids...>` re-queues each listed job as a brand-new job (new id, new log),
 copying its argv, cwd, GPU request, priority, label, and the environment captured
 at the original `add` (`Request::Rerun` → `AppState::rerun`, which just clones
 those fields through `add`). The source job's record is left untouched; works for
@@ -72,13 +81,14 @@ a job in any state.
 `kill --all` cancels every *active* job at once: running jobs get their kill
 switch fired (then become `Killed` via `finish`, like single `kill`) and queued
 jobs are dropped immediately; terminal jobs are untouched (use `clear` to prune
-those). Client maps `kill --all` to `Request::KillAll`; clap requires either an
-id or `--all` and treats them as mutually exclusive.
+those). Client maps `kill --all` to `Request::KillAll`; clap requires either
+ids or `--all` and treats them as mutually exclusive.
 
-`priority <id> <n>` re-prioritises a **queued** job so it can jump the queue
+`priority <ids...> <n>` re-prioritises **queued** jobs so they can jump the queue
 (`Request::SetPriority`); it errors on running/terminal jobs
-(`SetPriorityOutcome::NotQueued`). `add -p N` sets a job's priority at enqueue
-time.
+(`SetPriorityOutcome::NotQueued`). The last positional argument is always the
+priority value; all preceding arguments are job ids (ranges accepted). `add -p N`
+sets a job's priority at enqueue time.
 
 Daemon settings live under `msc config <setting>` (a nested `clap` subcommand,
 `ConfigCommand` in `cli.rs`) so they share one namespace and `--help` lists them
@@ -254,3 +264,20 @@ confirmed below as `@mochi-<user>.sock`).
       stale `Running` job to `Failed`. This matches the documented asymmetry; no
       action taken (no shutdown-time `killpg` sweep added), since `shutdown` is
       a clean exit path and crashes are rare/already reconciled on next start.
+
+> **Not yet verified on Windows (added 2026-06-28):** multi-id `kill`/`priority`/
+> `rerun` with range syntax, and execution-order `list` sort with `--by-id` flag.
+> All are pure client-side logic (no `#[cfg]`), so behaviour should be identical.
+> Run the checklist below on Windows before removing this note.
+
+- [ ] **Multi-id kill:** `kill 12 13-15` kills each id in order, printing
+      individual results; errors (not found / already done) are reported but
+      processing continues; exit code 1 if any error occurred.
+- [ ] **Multi-id priority:** `priority 12 13-15 10` sets all listed queued jobs to
+      priority 10 (last arg = new value, preceding args = ids / ranges); same
+      continue-on-error semantics as kill.
+- [ ] **Multi-id rerun:** `rerun 12 13-15` re-queues each listed job as a new job;
+      same continue-on-error semantics.
+- [ ] **Execution-order list:** default `list` shows running → queued (priority
+      desc, id asc) → terminal; `--by-id` reverts to id order; `--all --by-id`
+      reproduces the old full-history view.
