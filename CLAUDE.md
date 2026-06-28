@@ -228,13 +228,16 @@ confirmed below as `@mochi-<user>.sock`).
 - [x] **Basic lifecycle:** `add` / `list` / `info` / `cat` / `watch` / `remove`
       / `clear` all behave as documented (watch correctly tails the log live and
       stops once terminal).
-- [x] **`watch` running-only + optional id (verified 2026-06-25):** `watch <id>`
-      on a queued job prints `[WARN]` and refuses; on a terminal job (finished or
-      killed) prints `[WARN]` plus a `msc cat <id>` hint; a nonexistent id prints
-      `[ERROR]`. With no id: auto-picks the sole running job and tails it; lists
-      running jobs (via `print_jobs`) when there are several; prints `(no running
-      jobs to watch)` when idle. All six cases confirmed on Linux (pure
-      client-side logic, tested against the installed daemon).
+- [x] **`watch` running-only + optional id (Linux 2026-06-25, Windows
+      2026-06-28):** `watch <id>` on a queued job prints `[WARN]` and refuses
+      (no `cat` hint, since a queued job has no output yet); on a terminal job
+      (finished or killed) prints `[WARN]` plus a `msc cat <id>` hint; a
+      nonexistent id prints `[ERROR]`. With no id: auto-picks the sole running
+      job and tails it; lists running jobs (via `print_jobs`) when there are
+      several; prints `(no running jobs to watch)` when idle. All cases confirmed
+      on both Linux and Windows (pure client-side logic, tested against the
+      installed daemon); the explicit-running and no-id auto-pick paths were
+      additionally checked to live-tail and stop cleanly once the job finishes.
 - [x] **`rerun` (verified 2026-06-25):** `rerun <id>` creates a new queued job
       copying argv, label, and priority from the source; source job record is
       left untouched. Verified for a finished job and for a running job.
