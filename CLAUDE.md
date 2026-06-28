@@ -15,7 +15,7 @@ a time, in id order) and persists state to disk so jobs survive across runs.
 > clippy/fmt, and the full manual checklist below all pass. Still **untested on
 > macOS** specifically (filesystem-socket fallback path). The features added
 > 2026-06-28 (multi-id `kill`/`priority`/`rerun` with range syntax; execution-order
-> `list` sort + `--by-id` flag) are **Linux-verified, Windows-not-yet-tested**
+> `list` sort + `--by-id` flag) are now **verified on both Linux and Windows**
 > (all pure client-side logic, no `#[cfg]` branches). See the testing checklist.
 
 ## Commands
@@ -60,10 +60,12 @@ not meant to be called directly.
 
 `list` shows running and queued jobs by default; `--all` shows every state and
 `--state <S>` (repeatable, mutually exclusive with `--all`) shows exactly those
-states. Jobs are sorted by **execution order** (running first, then queued jobs in
-priority order matching the scheduler, then terminal jobs); `--by-id` reverts to
-the old id-order. Filtering and sorting are **client-side** (the daemon still
-returns all jobs), so the `List` protocol is unchanged.
+states. The **default** active-jobs view is sorted by **execution order** (running
+first, then queued jobs in priority order matching the scheduler); `--by-id`
+reverts that view to id-order. The `--all` and `--state` views always use id-order
+(chronological, natural for history), so `--by-id` is a no-op there. Filtering and
+sorting are **client-side** (the daemon still returns all jobs), so the `List`
+protocol is unchanged.
 
 `kill`, `priority`, and `rerun` all accept **multiple ids and ranges**: plain
 numbers (`12 13 14`) or `start-end` ranges (`12-15` expands to 12, 13, 14, 15),
@@ -268,19 +270,27 @@ confirmed below as `@mochi-<user>.sock`).
       action taken (no shutdown-time `killpg` sweep added), since `shutdown` is
       a clean exit path and crashes are rare/already reconciled on next start.
 
-> **Not yet verified on Windows (added 2026-06-28):** multi-id `kill`/`priority`/
-> `rerun` with range syntax, and execution-order `list` sort with `--by-id` flag.
-> All are pure client-side logic (no `#[cfg]`), so behaviour should be identical.
-> Run the checklist below on Windows before removing this note.
+> **Verified on Windows 2026-06-28** (against the installed daemon with throwaway
+> jobs, using a temporary `cpu-limit 1` to force a running+queued mix, all cleaned
+> up afterward): multi-id `kill`/`priority`/`rerun` with range syntax, and the
+> execution-order `list` sort with `--by-id`. All are pure client-side logic
+> (no `#[cfg]`), and were already Linux-verified.
 
-- [ ] **Multi-id kill:** `kill 12 13-15` kills each id in order, printing
-      individual results; errors (not found / already done) are reported but
-      processing continues; exit code 1 if any error occurred.
-- [ ] **Multi-id priority:** `priority 12 13-15 10` sets all listed queued jobs to
-      priority 10 (last arg = new value, preceding args = ids / ranges); same
-      continue-on-error semantics as kill.
-- [ ] **Multi-id rerun:** `rerun 12 13-15` re-queues each listed job as a new job;
-      same continue-on-error semantics.
-- [ ] **Execution-order list:** default `list` shows running → queued (priority
-      desc, id asc) → terminal; `--by-id` reverts to id order; `--all --by-id`
-      reproduces the old full-history view.
+- [x] **Multi-id kill (Windows 2026-06-28):** `kill 343 344-346 347 999999`
+      expanded the range and processed each id by its current state (running →
+      `Killed`, queued → `Dequeued`), reported the already-killed id and the
+      missing id as `[ERROR]` while continuing, and exited 1.
+- [x] **Multi-id priority (Windows 2026-06-28):** `priority 348 349-351 999999 20`
+      took the trailing `20` as the value and set the queued range to priority 20;
+      it errored on the running id (`not queued`) and the missing id while
+      continuing, and exited 1.
+- [x] **Multi-id rerun (Windows 2026-06-28):** `rerun 343-345 347 999999`
+      re-queued each `killed` source as a new job (354–357), left the sources
+      untouched (still `killed`), errored on the missing id while continuing, and
+      exited 1.
+- [x] **Execution-order list (Windows 2026-06-28):** default `list` showed the
+      running job first, then queued by priority desc / id asc (a job bumped to
+      priority 50 jumped ahead of the priority-20 and -0 queued jobs); `--by-id`
+      reverted to pure id order. The default view shows only running+queued;
+      `--all` / `--state` keep id (chronological) order regardless of `--by-id`
+      (so `--all` and `--all --by-id` produce the same output).
