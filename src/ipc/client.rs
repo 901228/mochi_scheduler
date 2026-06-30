@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, process::Stdio, time::Duration};
 
 use anyhow::{Context, bail};
+use chrono::{DateTime, Local, Utc};
 // use comfy_table::{CellAlignment, ContentArrangement, Table, modifiers, presets};
 use interprocess::local_socket::tokio::{Stream, prelude::*};
 
@@ -502,8 +503,8 @@ fn print_job_details(job: &Job) -> anyhow::Result<()> {
         format_gpu_list(&job.assigned_gpus)
     };
     let exit = job.exit_code.map(|c| c.to_string()).unwrap_or_else(dash);
-    let started = job.started_at.map(|t| t.to_rfc3339()).unwrap_or_else(dash);
-    let finished = job.finished_at.map(|t| t.to_rfc3339()).unwrap_or_else(dash);
+    let started = job.started_at.map(|t| fmt_local(t)).unwrap_or_else(dash);
+    let finished = job.finished_at.map(|t| fmt_local(t)).unwrap_or_else(dash);
 
     let mut table = Table::new();
     table
@@ -518,7 +519,7 @@ fn print_job_details(job: &Job) -> anyhow::Result<()> {
         .add_row(vec!["assigned gpus".to_string(), assigned])
         .add_row(vec!["exit code".to_string(), exit])
         .add_row(vec!["log".to_string(), job.log_path.display().to_string()])
-        .add_row(vec!["enqueued".to_string(), job.enqueued_at.to_rfc3339()])
+        .add_row(vec!["enqueued".to_string(), fmt_local(job.enqueued_at)])
         .add_row(vec!["started".to_string(), started])
         .add_row(vec!["finished".to_string(), finished]);
 
@@ -585,6 +586,10 @@ fn print_jobs(jobs: &[Job]) -> anyhow::Result<()> {
 }
 
 /// Render assigned GPU indices like `[0,2]` for table display.
+fn fmt_local(t: DateTime<Utc>) -> String {
+    t.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 fn format_gpu_list(indices: &[u32]) -> String {
     let joined = indices
         .iter()
