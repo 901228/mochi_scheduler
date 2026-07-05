@@ -100,11 +100,18 @@ pub enum Command {
 
     /// Re-run one or more jobs: queue a fresh copy (same command, dir, and environment).
     ///
-    /// Accepts multiple ids and ranges, e.g. `msc rerun 12 15-18`.
+    /// Accepts multiple ids and ranges, e.g. `msc rerun 12 15-18`. The re-queued
+    /// job starts at priority 0 by default (not the source job's priority); pass
+    /// `-p N` to give the fresh copy a different priority.
     Rerun {
         /// Job id(s) to re-run. Accepts ranges like `12-15`.
         #[arg(required = true, num_args = 1..)]
         ids: Vec<String>,
+
+        /// Priority for the re-queued job(s); higher runs first (default 0,
+        /// regardless of the source job's priority).
+        #[arg(short, long, default_value_t = 0, allow_hyphen_values = true)]
+        priority: i32,
     },
 
     /// Remove a finished or queued job from the list.

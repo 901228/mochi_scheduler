@@ -137,18 +137,19 @@ impl AppState {
     }
 
     /// Re-queue an existing job as a fresh job (new id, new log file), copying
-    /// its command, working dir, GPU request, priority, label, and the
-    /// environment captured at the original `add`. The source job's record is
+    /// its command, working dir, GPU request, label, and the environment
+    /// captured at the original `add`. The new job's priority is taken from the
+    /// caller (`priority`), *not* copied from the source, so a rerun defaults to
+    /// priority 0 unless the caller asks otherwise. The source job's record is
     /// left untouched. Returns the new id, or `None` if no such job exists.
-    pub fn rerun(&mut self, log_dir: &PathBuf, id: u32) -> Option<u32> {
+    pub fn rerun(&mut self, log_dir: &PathBuf, id: u32, priority: i32) -> Option<u32> {
         let job = self.jobs.get(&id)?;
         // Clone the fields first so the immutable borrow ends before `add`.
-        let (argv, label, cwd, gpus, priority, env) = (
+        let (argv, label, cwd, gpus, env) = (
             job.argv.clone(),
             job.label.clone(),
             job.cwd.clone(),
             job.gpus,
-            job.priority,
             job.env.clone(),
         );
         Some(self.add(log_dir, argv, label, cwd, gpus, priority, env))
@@ -742,7 +743,9 @@ mod tests {
         s.take_next_runnable(4);
         s.finish(id, RunResult::Exited(Some(1))); // original is now terminal
 
-        let new_id = s.rerun(&log_dir(), id).unwrap();
+        // Rerun with an explicit priority; the caller's value wins, not the
+        // source job's priority (5).
+        let new_id = s.rerun(&log_dir(), id, 3).unwrap();
         assert_ne!(new_id, id);
 
         // Original record is untouched.
@@ -757,7 +760,8 @@ mod tests {
         assert_eq!(new.label.as_deref(), Some("greet"));
         assert_eq!(new.cwd, PathBuf::from("/work"));
         assert_eq!(new.gpus, 2);
-        assert_eq!(new.priority, 5);
+        // Priority comes from the rerun call, not the source (which was 5).
+        assert_eq!(new.priority, 3);
         assert_eq!(new.env, env);
         assert_eq!(new.exit_code, None);
         assert!(new.started_at.is_none());
@@ -765,9 +769,18 @@ mod tests {
     }
 
     #[test]
+    fn rerun_defaults_priority_to_zero_not_the_source() {
+        let mut s = AppState::default();
+        let id = enqueue_prio(&mut s, "a", 7);
+        // The client passes 0 when `-p` is omitted; the source's 7 is ignored.
+        let new_id = s.rerun(&log_dir(), id, 0).unwrap();
+        assert_eq!(s.get(new_id).unwrap().priority, 0);
+    }
+
+    #[test]
     fn rerun_missing_job_returns_none() {
         let mut s = AppState::default();
-        assert!(s.rerun(&log_dir(), 42).is_none());
+        assert!(s.rerun(&log_dir(), 42, 0).is_none());
     }
 
     #[test]

@@ -36,7 +36,8 @@ msc cat 3                         # print job 3's captured output (stdout + stde
 msc watch 3                       # follow a running job's output live; Ctrl+C stops watching, not the job
 msc watch                         # watch the sole running job, or list the running jobs to choose from
 msc priority 3 10                 # bump a queued job's priority so it jumps the queue
-msc rerun 3                       # re-queue a fresh copy of job 3 (same command, dir, env)
+msc rerun 3                       # re-queue a fresh copy of job 3 (same command, dir, env) at priority 0
+msc rerun 3 -p 10                 # re-queue job 3 at a chosen priority instead of the default 0
 msc kill 3                        # stop a running job, or drop a queued one
 msc kill --all                    # stop every running job and drop every queued one
 msc remove 3                      # remove a finished job from the list

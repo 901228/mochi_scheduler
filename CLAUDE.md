@@ -54,7 +54,7 @@ one down first.
 ### CLI subcommands (`msc <cmd>`)
 `add [-l label] [-g N] [-p N] <argv...>`, `list [-a|--all] [-s|--state S]... [--by-id]`,
 `info <id>`, `cat <id>`, `watch [<id>]`, `kill <ids...> | kill --all`,
-`priority <ids...> <n>`, `rerun <ids...>`, `remove <id>`, `clear`, `config <setting>`,
+`priority <ids...> <n>`, `rerun <ids...> [-p N]`, `remove <id>`, `clear`, `config <setting>`,
 `shutdown`. The hidden `__daemon` subcommand runs the background process and is
 not meant to be called directly.
 
@@ -74,11 +74,14 @@ independently — errors are printed but processing continues for the remaining 
 Client-side `parse_job_ids` expands the id args before sending individual
 requests; no protocol change.
 
-`rerun <ids...>` re-queues each listed job as a brand-new job (new id, new log),
-copying its argv, cwd, GPU request, priority, label, and the environment captured
-at the original `add` (`Request::Rerun` → `AppState::rerun`, which just clones
-those fields through `add`). The source job's record is left untouched; works for
-a job in any state.
+`rerun <ids...> [-p N]` re-queues each listed job as a brand-new job (new id, new
+log), copying its argv, cwd, GPU request, label, and the environment captured at
+the original `add` (`Request::Rerun { id, priority }` → `AppState::rerun`, which
+clones those fields through `add`). The new job's **priority is not copied from
+the source** — it defaults to `0`, or to `-p N` when given (the client always
+sends a priority; clap's `default_value_t = 0` supplies the default). This lets a
+rerun start at normal priority even if the original had been bumped. The source
+job's record is left untouched; works for a job in any state.
 
 `kill --all` cancels every *active* job at once: running jobs get their kill
 switch fired (then become `Killed` via `finish`, like single `kill`) and queued
@@ -240,9 +243,14 @@ confirmed below as `@mochi-<user>.sock`).
       on both Linux and Windows (pure client-side logic, tested against the
       installed daemon); the explicit-running and no-id auto-pick paths were
       additionally checked to live-tail and stop cleanly once the job finishes.
-- [x] **`rerun` (verified 2026-06-25):** `rerun <id>` creates a new queued job
-      copying argv, label, and priority from the source; source job record is
-      left untouched. Verified for a finished job and for a running job.
+- [x] **`rerun` (verified 2026-06-25; priority behavior Windows 2026-07-05):**
+      `rerun <id>` creates a new queued job copying argv, label, cwd, GPU request,
+      and env from the source; source job record is left untouched. Verified for a
+      finished job and for a running job. The re-queued job's **priority is not
+      copied** — it defaults to `0` and takes `-p N` when given: verified on
+      Windows that reruning a priority-7 job with no `-p` yields priority 0, `-p 20`
+      yields 20, `-p -5` yields -5 (negative accepted), and `rerun 428-429 -p 3`
+      sets a whole range to priority 3.
 - [x] **Whole-tree kill:** a job running `bash -c 'sleep 100 & sleep 100 & wait'`
       put all 3 processes in one process group (confirmed via `ps
       -eo pid,ppid,pgid`); `kill <id>` removed every one (`pgrep -g <pgid>`

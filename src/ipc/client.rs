@@ -21,7 +21,7 @@ pub async fn run(settings: Settings, command: Command) -> anyhow::Result<()> {
         Command::List { all, state, by_id } => list_jobs(&settings, all, &state, by_id).await,
         Command::Kill { ids, all: false } => kill_many(&settings, &ids).await,
         Command::Priority { args } => set_priority_many(&settings, &args).await,
-        Command::Rerun { ids } => rerun_many(&settings, &ids).await,
+        Command::Rerun { ids, priority } => rerun_many(&settings, &ids, priority).await,
         command => {
             let request = build_request(command)?;
             let mut conn = connect_or_spawn(&settings).await?;
@@ -163,12 +163,14 @@ async fn set_priority_many(settings: &Settings, args: &[String]) -> anyhow::Resu
 }
 
 /// Re-run multiple jobs by id, continuing past errors and printing each result.
-async fn rerun_many(settings: &Settings, id_args: &[String]) -> anyhow::Result<()> {
+/// The re-queued copies all start at `priority` (default 0), not the source
+/// jobs' priorities.
+async fn rerun_many(settings: &Settings, id_args: &[String], priority: i32) -> anyhow::Result<()> {
     let ids = parse_job_ids(id_args)?;
     let mut had_error = false;
     for id in ids {
         let mut conn = connect_or_spawn(settings).await?;
-        protocol::write_msg(&mut conn, &Request::Rerun { id }).await?;
+        protocol::write_msg(&mut conn, &Request::Rerun { id, priority }).await?;
         let resp: Response = protocol::read_msg(&mut conn).await?;
         drop(conn);
         match resp {

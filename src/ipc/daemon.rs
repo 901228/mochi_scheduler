@@ -202,7 +202,7 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
                 SetPriorityOutcome::NotFound => Response::Error(format!("No such job (id {id})")),
             }
         }
-        Request::Rerun { id } => {
+        Request::Rerun { id, priority } => {
             let new_id = {
                 let mut state = daemon.state.lock().unwrap();
                 let Some(job) = state.get(id) else {
@@ -216,7 +216,9 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
                         job.gpus, daemon.gpu.count
                     ));
                 }
-                let new_id = state.rerun(&daemon.settings.log_dir, id).expect("job exists");
+                let new_id = state
+                    .rerun(&daemon.settings.log_dir, id, priority)
+                    .expect("job exists");
                 if let Err(e) = state.save(&daemon.settings.state_file) {
                     return Response::Error(format!("persisting state: {e}"));
                 }

@@ -37,9 +37,12 @@ pub enum Request {
         id: u32,
         priority: i32,
     },
-    /// Re-queue an existing job as a new job, re-running its command.
+    /// Re-queue an existing job as a new job, re-running its command. The fresh
+    /// copy is enqueued at `priority` (defaults to 0 on the client side, not the
+    /// source job's priority).
     Rerun {
         id: u32,
+        priority: i32,
     },
     Remove {
         id: u32,
