@@ -3,5 +3,4 @@ max_width = 110
 
 imports_granularity = "Crate"
 group_imports = "StdExternalCrate"
-merge_imports = true
 reorder_imports = true

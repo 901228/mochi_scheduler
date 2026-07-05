@@ -2,16 +2,13 @@ mod frame_style;
 mod header_style;
 mod text_style;
 
-use super::Table;
-use colored::ColoredString;
-use colored::{Color, Style};
-
-pub use frame_style::{FrameCorner, FrameLine};
-
+use colored::{Color, ColoredString, Style};
 pub(super) use frame_style::FrameStyle;
+pub use frame_style::{FrameCorner, FrameLine};
 pub(super) use header_style::HeaderStyle;
-pub(super) use text_style::TextAlignment;
-pub(super) use text_style::TextStyle;
+pub(super) use text_style::{TextAlignment, TextStyle};
+
+use super::Table;
 
 pub(super) trait StringStyle {
     fn get_fgcolor(&self) -> Option<Color>;

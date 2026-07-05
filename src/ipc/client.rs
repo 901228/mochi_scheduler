@@ -133,12 +133,15 @@ async fn kill_many(settings: &Settings, id_args: &[String]) -> anyhow::Result<()
 /// the last is the priority value and all preceding elements are job ids.
 async fn set_priority_many(settings: &Settings, args: &[String]) -> anyhow::Result<()> {
     // Enforced by clap (num_args = 2..), but guard defensively.
-    assert!(args.len() >= 2, "priority requires at least one id and a priority value");
+    assert!(
+        args.len() >= 2,
+        "priority requires at least one id and a priority value"
+    );
 
     let priority_str = args.last().unwrap();
-    let priority: i32 = priority_str.parse().with_context(|| {
-        format!("'{priority_str}' is not a valid priority value (expected integer)")
-    })?;
+    let priority: i32 = priority_str
+        .parse()
+        .with_context(|| format!("'{priority_str}' is not a valid priority value (expected integer)"))?;
     let ids = parse_job_ids(&args[..args.len() - 1])?;
 
     let mut had_error = false;
@@ -356,7 +359,12 @@ async fn fetch_all_jobs(settings: &Settings) -> anyhow::Result<Vec<Job>> {
 /// Jobs are sorted by execution order for the default active-jobs view only.
 /// --all and --state views keep id order (chronological, natural for history).
 /// --by-id overrides to id order for the default view.
-async fn list_jobs(settings: &Settings, all: bool, states: &[StateFilter], by_id: bool) -> anyhow::Result<()> {
+async fn list_jobs(
+    settings: &Settings,
+    all: bool,
+    states: &[StateFilter],
+    by_id: bool,
+) -> anyhow::Result<()> {
     let mut filtered: Vec<Job> = fetch_all_jobs(settings)
         .await?
         .into_iter()
@@ -651,10 +659,7 @@ mod tests {
         );
 
         // multiple ranges
-        assert_eq!(
-            parse_job_ids(&[s("1-2"), s("5-6")]).unwrap(),
-            vec![1, 2, 5, 6]
-        );
+        assert_eq!(parse_job_ids(&[s("1-2"), s("5-6")]).unwrap(), vec![1, 2, 5, 6]);
     }
 
     #[test]

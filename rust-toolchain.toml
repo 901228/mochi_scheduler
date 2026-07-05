@@ -1,0 +1,6 @@
+[toolchain]
+# Pin a specific nightly so rustfmt (which uses the unstable options in
+# rustfmt.toml) formats identically on every machine, instead of drifting
+# between whatever nightly each host happens to have installed.
+channel = "nightly-2026-07-02"
+components = ["rustfmt", "clippy"]
