@@ -66,9 +66,16 @@ pub enum Command {
     ///
     /// Only running jobs can be watched. Omit the id to watch the sole running
     /// job, or to list the running jobs to choose from when there are several.
+    /// By default only output produced from now on is shown; pass `--from-start`
+    /// to replay the whole log so far first.
     Watch {
         /// Job id. Omit to auto-pick / list the running jobs.
         id: Option<u32>,
+
+        /// Show the entire log from the beginning before following, instead of
+        /// only new output from now on.
+        #[arg(short = 'a', long = "from-start")]
+        from_start: bool,
     },
 
     /// Kill one or more running jobs, or drop jobs that are still queued.
@@ -114,6 +121,30 @@ pub enum Command {
         priority: i32,
     },
 
+    /// Pause the scheduler, or pull specific queued jobs out of the queue.
+    ///
+    /// With no id, pauses the whole scheduler: running jobs finish but no new
+    /// job starts until `msc resume`. With one or more ids (ranges accepted,
+    /// e.g. `msc pause 12 15-18`), pauses just those queued jobs so the
+    /// scheduler skips them until they are resumed.
+    Pause {
+        /// Job id(s) to pause. Accepts ranges like `12-15`. Omit to pause the
+        /// whole scheduler.
+        #[arg(num_args = 0..)]
+        ids: Vec<String>,
+    },
+
+    /// Resume the scheduler, or put specific paused jobs back into the queue.
+    ///
+    /// The inverse of `pause`: with no id it un-pauses the scheduler; with ids
+    /// (ranges accepted) it re-queues those paused jobs.
+    Resume {
+        /// Job id(s) to resume. Accepts ranges like `12-15`. Omit to resume the
+        /// whole scheduler.
+        #[arg(num_args = 0..)]
+        ids: Vec<String>,
+    },
+
     /// Remove a finished or queued job from the list.
     Remove {
         /// Job id.
@@ -144,6 +175,7 @@ pub enum Command {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum StateFilter {
     Queued,
+    Paused,
     Running,
     Finished,
     Killed,

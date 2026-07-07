@@ -14,7 +14,10 @@ use tokio::sync::{Notify, oneshot};
 
 use super::{
     protocol::{self, Request, Response},
-    scheduler::{AppState, KillOutcome, RemoveOutcome, RunResult, RunSpec, SetPriorityOutcome},
+    scheduler::{
+        AppState, KillOutcome, PauseJobOutcome, RemoveOutcome, ResumeJobOutcome, RunResult, RunSpec,
+        SetPriorityOutcome,
+    },
 };
 use crate::{gpu, process_tree, settings::Settings};
 
@@ -267,6 +270,70 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
             // Raising the limit may make queued CPU jobs runnable; wake the scheduler.
             daemon.notify.notify_one();
             Response::Ok(format!("CPU job limit set to {}", describe_cpu_limit(limit)))
+        }
+        Request::PauseScheduler => {
+            let changed = {
+                let mut state = daemon.state.lock().unwrap();
+                let changed = state.pause_scheduler();
+                if let Err(e) = state.save(&daemon.settings.state_file) {
+                    return Response::Error(format!("persisting state: {e}"));
+                }
+                changed
+            };
+            // No notify: pausing only stops new jobs; running ones finish on their own.
+            if changed {
+                Response::Ok(
+                    "Scheduler paused; running jobs finish, no new jobs start until `msc resume`".into(),
+                )
+            } else {
+                Response::Ok("Scheduler is already paused".into())
+            }
+        }
+        Request::ResumeScheduler => {
+            let changed = {
+                let mut state = daemon.state.lock().unwrap();
+                let changed = state.resume_scheduler();
+                if let Err(e) = state.save(&daemon.settings.state_file) {
+                    return Response::Error(format!("persisting state: {e}"));
+                }
+                changed
+            };
+            // Wake the scheduler so it backfills any queued jobs held during the pause.
+            daemon.notify.notify_one();
+            if changed {
+                Response::Ok("Scheduler resumed".into())
+            } else {
+                Response::Ok("Scheduler was not paused".into())
+            }
+        }
+        Request::PauseJob { id } => {
+            let outcome = daemon.state.lock().unwrap().pause_job(id);
+            match outcome {
+                PauseJobOutcome::Paused => {
+                    persist(daemon);
+                    Response::Ok(format!("Paused job {id}"))
+                }
+                PauseJobOutcome::AlreadyPaused => Response::Ok(format!("Job {id} is already paused")),
+                PauseJobOutcome::NotQueued(state) => {
+                    Response::Error(format!("Job {id} is {state}; only queued jobs can be paused"))
+                }
+                PauseJobOutcome::NotFound => Response::Error(format!("No such job (id {id})")),
+            }
+        }
+        Request::ResumeJob { id } => {
+            let outcome = daemon.state.lock().unwrap().resume_job(id);
+            match outcome {
+                ResumeJobOutcome::Resumed => {
+                    persist(daemon);
+                    // The job is queued again; wake the scheduler to consider it.
+                    daemon.notify.notify_one();
+                    Response::Ok(format!("Resumed job {id}"))
+                }
+                ResumeJobOutcome::NotPaused(state) => {
+                    Response::Error(format!("Job {id} is {state}, not paused"))
+                }
+                ResumeJobOutcome::NotFound => Response::Error(format!("No such job (id {id})")),
+            }
         }
         Request::Shutdown => {
             // Reply is sent by the caller before we exit, so schedule the exit.

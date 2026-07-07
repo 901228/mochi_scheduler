@@ -53,16 +53,17 @@ one down first.
 
 ### CLI subcommands (`msc <cmd>`)
 `add [-l label] [-g N] [-p N] <argv...>`, `list [-a|--all] [-s|--state S]... [--by-id]`,
-`info <id>`, `cat <id>`, `watch [<id>]`, `kill <ids...> | kill --all`,
-`priority <ids...> <n>`, `rerun <ids...> [-p N]`, `remove <id>`, `clear`, `config <setting>`,
-`shutdown`. The hidden `__daemon` subcommand runs the background process and is
-not meant to be called directly.
+`info <id>`, `cat <id>`, `watch [<id>] [-a|--from-start]`, `kill <ids...> | kill --all`,
+`priority <ids...> <n>`, `rerun <ids...> [-p N]`, `pause [<ids...>]`,
+`resume [<ids...>]`, `remove <id>`, `clear`, `config <setting>`, `shutdown`. The
+hidden `__daemon` subcommand runs the background process and is not meant to be
+called directly.
 
-`list` shows running and queued jobs by default; `--all` shows every state and
-`--state <S>` (repeatable, mutually exclusive with `--all`) shows exactly those
-states. The **default** active-jobs view is sorted by **execution order** (running
-first, then queued jobs in priority order matching the scheduler); `--by-id`
-reverts that view to id-order. The `--all` and `--state` views always use id-order
+`list` shows running, queued, and paused jobs by default; `--all` shows every
+state and `--state <S>` (repeatable, mutually exclusive with `--all`) shows
+exactly those states. The **default** active-jobs view is sorted by **execution
+order** (running first, then queued jobs in priority order matching the scheduler,
+then paused jobs); `--by-id` reverts that view to id-order. The `--all` and `--state` views always use id-order
 (chronological, natural for history), so `--by-id` is a no-op there. Filtering and
 sorting are **client-side** (the daemon still returns all jobs), so the `List`
 protocol is unchanged.
@@ -95,6 +96,22 @@ ids or `--all` and treats them as mutually exclusive.
 priority value; all preceding arguments are job ids (ranges accepted). `add -p N`
 sets a job's priority at enqueue time.
 
+`pause` / `resume` have two granularities selected by whether ids are given
+(clap `ids: Vec<String>` with `num_args = 0..`; the client routes empty-vs-ids in
+`pause_or_resume`):
+- **No ids → whole scheduler.** `Request::PauseScheduler` sets `AppState.paused`
+  (persisted, `serde(default) false`); `take_next_runnable` returns `None` while
+  it's set, so running jobs finish but nothing new starts. `resume`
+  (`ResumeScheduler`) clears it and notifies the scheduler to backfill. Both are
+  idempotent (report "already paused" / "was not paused"). The pause survives a
+  daemon restart (it's in `state.json`).
+- **With ids → individual jobs.** `PauseJob`/`ResumeJob` per id (ranges expanded
+  client-side like `kill`). `pause_job` moves a **queued** job to the new
+  `JobState::Paused` (errors on running/terminal via `PauseJobOutcome::NotQueued`;
+  `AlreadyPaused` is a benign no-op); `resume_job` moves `Paused → Queued` and
+  notifies. A paused job is skipped by the scheduler (only `Queued` is runnable),
+  still shows in `list`, and is dropped by `kill`/`kill --all` like a queued job.
+
 Daemon settings live under `msc config <setting>` (a nested `clap` subcommand,
 `ConfigCommand` in `cli.rs`) so they share one namespace and `--help` lists them
 together; add new settings as `ConfigCommand` variants. Currently:
@@ -108,7 +125,10 @@ together; add new settings as `ConfigCommand` variants. Currently:
   setting it re-notifies the scheduler.
 
 `watch` is client-side only: it reuses `Info` (for log path + state) and tails
-the log file, polling until the job is terminal. Ctrl+C (via
+the log file, polling until the job is terminal. By **default it streams only
+output produced from now on** — `follow` seeds its start offset with the log's
+current size (`current_log_len`) so pre-existing history is skipped; `-a` /
+`--from-start` seeds offset 0 to replay the whole log first. Ctrl+C (via
 `tokio::signal::ctrl_c`) stops the watch but not the job — the job is the
 daemon's child, not the client's, so the client never has a way to signal it.
 It **only follows running jobs**: an explicit id that is queued/terminal prints
@@ -118,6 +138,11 @@ finished log; a missing id is an `[ERROR]`. The id is optional
 sole running job, or lists the running jobs (via `print_jobs`) when there are
 several, or reports none. The id-less / list paths reuse `fetch_all_jobs` (a
 `List` request), the same helper `list` now uses.
+
+`info <id>` (`print_job_details`) shows an **elapsed** row computed client-side:
+live (`Utc::now() - started_at`) while running, final (`finished_at - started_at`)
+once terminal, `-` before it starts. `fmt_duration` renders only the significant
+units (`5s`, `2m 3s`, `1h 2m 3s`, `1d 2h 3m 4s`).
 
 ## Architecture
 
@@ -175,9 +200,11 @@ runs `daemon::run`, everything else runs `client::run`.
   never leaves a half-written file. On `load`, any job still marked `Running`
   (daemon died mid-run) is reconciled to `Failed`.
 - **Job model (`ipc/job.rs`):** `JobState` is `Queued → Running → {Finished,
-  Killed, Failed}`. `is_terminal()` drives `clear`. Job output (stdout+stderr
-  merged) is redirected to a per-job log file `<log_dir>/<id>.log`; `cat` returns
-  the path and the **client** reads the file directly.
+  Killed, Failed}`, plus `Paused` (a queued job pulled aside by `msc pause <id>`;
+  `Paused → Queued` on resume). `is_terminal()` (Finished/Killed/Failed only)
+  drives `clear`, so paused jobs are kept. Job output (stdout+stderr merged) is
+  redirected to a per-job log file `<log_dir>/<id>.log`; `cat` returns the path
+  and the **client** reads the file directly.
 - **Working dir & environment capture:** the client snapshots its `cwd` and full
   environment (`std::env::vars()`) at `add` time and sends them in the request;
   the job is persisted with both and `run_one` applies them (`env_clear` then the
@@ -208,97 +235,48 @@ runs `daemon::run`, everything else runs `client::run`.
 - `MOCHI_HOME` is the intended mechanism for test isolation: point it at a temp
   dir to get a fresh queue and socket.
 
-## Linux testing checklist
+## Testing checklist
 
-Verified on Arch Linux (kernel 7.0.12-arch1-1, rustc 1.96.0) on 2026-06-24, all
-via an isolated `MOCHI_HOME`. macOS is still untested — in particular the
-filesystem-socket fallback path (Linux uses the abstract-namespace socket,
-confirmed below as `@mochi-<user>.sock`).
+Rows are individual behaviors; columns are the OSes they've been exercised on.
+**Windows** is the primary development platform. **Linux** was verified on Arch
+(kernel 7.0.12-arch1-1, rustc 1.96.0) on 2026-06-24 via an isolated `MOCHI_HOME`.
+**macOS** is **still untested** — most importantly the filesystem-socket fallback
+path (Linux uses the abstract-namespace socket `@mochi-<user>.sock`, Windows a
+named pipe, macOS a filesystem socket).
 
-- [x] **Compiles & unit tests:** `cargo build` and `cargo test` pass on Linux
-      (36/36 unit tests green).
-- [x] **`clippy` / `fmt`** clean on Linux (`cargo fmt --check` no diff;
-      `cargo clippy --all-targets` zero errors, only pre-existing dead-code
-      warnings plus one new one: `process_tree.rs`'s `use
-      std::os::unix::process::CommandExt` is unused because `tokio::process::Command`
-      already exposes `pre_exec` itself on Unix — harmless, worth a follow-up
-      cleanup).
-- [x] **Daemon auto-spawn & detach:** a client call spawns the daemon; a job
-      queued from a subshell that immediately exits keeps running and the
-      daemon is reparented to `systemd --user` (confirmed via `ps`), i.e. fully
-      detached from the spawning shell.
-- [x] **Socket:** abstract-namespace socket `@mochi-<user>.sock` confirmed via
-      `/proc/net/unix`; per-user naming avoids collisions. (macOS
-      filesystem-socket fallback still unverified — no macOS box available.)
-- [x] **Basic lifecycle:** `add` / `list` / `info` / `cat` / `watch` / `remove`
-      / `clear` all behave as documented (watch correctly tails the log live and
-      stops once terminal).
-- [x] **`watch` running-only + optional id (Linux 2026-06-25, Windows
-      2026-06-28):** `watch <id>` on a queued job prints `[WARN]` and refuses
-      (no `cat` hint, since a queued job has no output yet); on a terminal job
-      (finished or killed) prints `[WARN]` plus a `msc cat <id>` hint; a
-      nonexistent id prints `[ERROR]`. With no id: auto-picks the sole running
-      job and tails it; lists running jobs (via `print_jobs`) when there are
-      several; prints `(no running jobs to watch)` when idle. All cases confirmed
-      on both Linux and Windows (pure client-side logic, tested against the
-      installed daemon); the explicit-running and no-id auto-pick paths were
-      additionally checked to live-tail and stop cleanly once the job finishes.
-- [x] **`rerun` (verified 2026-06-25; priority behavior Windows 2026-07-05):**
-      `rerun <id>` creates a new queued job copying argv, label, cwd, GPU request,
-      and env from the source; source job record is left untouched. Verified for a
-      finished job and for a running job. The re-queued job's **priority is not
-      copied** — it defaults to `0` and takes `-p N` when given: verified on
-      Windows that reruning a priority-7 job with no `-p` yields priority 0, `-p 20`
-      yields 20, `-p -5` yields -5 (negative accepted), and `rerun 428-429 -p 3`
-      sets a whole range to priority 3.
-- [x] **Whole-tree kill:** a job running `bash -c 'sleep 100 & sleep 100 & wait'`
-      put all 3 processes in one process group (confirmed via `ps
-      -eo pid,ppid,pgid`); `kill <id>` removed every one (`pgrep -g <pgid>`
-      empty afterward) — no orphaned grandchildren.
-- [x] **`kill --all`:** with `cpu-limit 1` forcing a running+queued mix, `kill
-      --all` killed the running job's whole tree and dropped the queued ones;
-      no orphan processes remained.
-- [x] **GPU isolation:** with `MOCHI_GPU_COUNT=2`, two `-g 1` jobs got
-      `CUDA_VISIBLE_DEVICES=0` and `=1` respectively; a 0-GPU job got an empty
-      value (correctly hidden from all GPUs, the documented Unix-vs-Windows
-      difference). `MOCHI_GPU_VENDOR=amd` also verified: jobs see
-      `HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` instead. Over-requesting GPUs
-      (`-g 5` with only 2 available) is rejected as expected.
-- [x] **Priority:** `add -p N` and `priority <id> <n>` both reorder the queue;
-      verified a job promoted via `priority` ran before a higher-id job that had
-      a lower priority (confirmed by `started` timestamps in `info`).
-- [x] **Env capture:** a job picked up a variable exported only in the calling
-      shell at `add` time, confirming the snapshot-based env capture works on
-      Unix.
-- [x] **Daemon-crash cleanup gap (confirmed, by design):** `kill -9` on the
-      daemon left its running child (`sleep 60`) orphaned — Unix process groups
-      have no kill-on-close equivalent to Windows Job Objects. On the next
-      daemon start, `AppState::load`'s reconciliation correctly flipped the
-      stale `Running` job to `Failed`. This matches the documented asymmetry; no
-      action taken (no shutdown-time `killpg` sweep added), since `shutdown` is
-      a clean exit path and crashes are rare/already reconciled on next start.
+Legend: ✅ verified (date, 2026 unless noted) · ➖ not yet tested · N/A not
+applicable on this OS.
 
-> **Verified on Windows 2026-06-28** (against the installed daemon with throwaway
-> jobs, using a temporary `cpu-limit 1` to force a running+queued mix, all cleaned
-> up afterward): multi-id `kill`/`priority`/`rerun` with range syntax, and the
-> execution-order `list` sort with `--by-id`. All are pure client-side logic
-> (no `#[cfg]`), and were already Linux-verified.
+| Test | Win | Linux | macOS | Notes |
+| --- | :---: | :---: | :---: | --- |
+| Compiles & unit tests | ✅ | ✅ 06-24 | ➖ | `cargo build` + `cargo test` (36/36 green on Linux). |
+| `clippy` / `fmt` clean | ✅ | ✅ 06-24 | ➖ | `cargo fmt --check` no diff; `clippy --all-targets` zero errors (only pre-existing dead-code warnings). |
+| Daemon auto-spawn & detach | ✅ | ✅ 06-24 | ➖ | Client spawns the daemon; a job queued from a subshell that exits keeps running (Linux: daemon reparented to `systemd --user`). |
+| Socket | ✅ named pipe | ✅ 06-24 abstract | ➖ | Per-user name (`mochi-<user>.sock`) avoids collisions. macOS filesystem-socket fallback is the key unverified path. |
+| Basic lifecycle | ✅ | ✅ 06-24 | ➖ | `add` / `list` / `info` / `cat` / `watch` / `remove` / `clear` all behave as documented (watch tails live, stops once terminal). |
+| `watch` running-only + optional id | ✅ 06-28 | ✅ 06-25 | ➖ | Queued → `[WARN]` (no `cat` hint); terminal → `[WARN]` + `msc cat <id>` hint; missing → `[ERROR]`. No id: auto-picks sole running job, lists via `print_jobs` when several, `(no running jobs to watch)` when idle. Live-tail + clean stop confirmed. |
+| `rerun` (+ priority default) | ✅ 07-05 | ✅ 06-25 | ➖ | New queued job copies argv/label/cwd/GPU/env; source untouched (finished & running sources verified). Priority is **not** copied — defaults `0`, takes `-p N` (Win: `-p 20`→20, `-p -5`→-5, `rerun 428-429 -p 3`→whole range 3). |
+| Whole-tree kill | ✅ Job Object | ✅ 06-24 pgroup | ➖ | `bash -c 'sleep 100 & sleep 100 & wait'` → one process group; `kill <id>` removed every process, no orphaned grandchildren. |
+| `kill --all` | ✅ | ✅ 06-24 | ➖ | With `cpu-limit 1` forcing a running+queued mix: killed the running tree, dropped the queued; no orphans. |
+| GPU isolation | ✅ | ✅ 06-24 | ➖ | `MOCHI_GPU_COUNT=2` → two `-g 1` jobs get `CUDA_VISIBLE_DEVICES=0`/`=1`; 0-GPU job hidden on Unix (empty var) but not isolated on Windows (documented diff). `MOCHI_GPU_VENDOR=amd` → HIP/ROCR vars. Over-request (`-g 5`) rejected. |
+| Priority | ✅ | ✅ 06-24 | ➖ | `add -p N` and `priority <id> <n>` both reorder the queue (confirmed via `started` timestamps in `info`). |
+| Env capture | ✅ | ✅ 06-24 | ➖ | Job picks up a variable exported only in the calling shell at `add` time (snapshot-based capture). |
+| Daemon-crash cleanup gap | N/A | ✅ 06-24 | ➖ | Unix-only asymmetry: `kill -9` on the daemon orphans its child (no Job-Object kill-on-close); next start reconciles stale `Running` → `Failed`. On Windows the Job Object reaps the tree, so no gap exists. |
+| Multi-id `kill` (ranges) | ✅ 06-28 | ✅ | ➖ | `kill 343 344-346 347 999999`: expands the range, processes each id by state (running → `Killed`, queued → `Dequeued`), `[ERROR]` on already-killed/missing while continuing, exits 1. |
+| Multi-id `priority` (ranges) | ✅ 06-28 | ✅ | ➖ | `priority 348 349-351 999999 20`: trailing arg is the value, sets the queued range; errors on running (`not queued`)/missing while continuing, exits 1. |
+| Multi-id `rerun` (ranges) | ✅ 06-28 | ✅ | ➖ | `rerun 343-345 347 999999`: re-queues each source as a new job, sources untouched, errors on missing while continuing, exits 1. |
+| Execution-order `list` + `--by-id` | ✅ 06-28 | ✅ | ➖ | Default view: running first, then queued by priority desc / id asc; `--by-id` → pure id order. `--all` / `--state` always id (chronological) order regardless of `--by-id`. |
+| Global `pause` / `resume` | ✅ 07-07 | ➖ | ➖ | `pause` (no id) holds new scheduling: added jobs stayed `queued`, none ran; `resume` restarted them (cpu-limit 1 → one running). Idempotent replies ("already paused" / "was not paused"). Persisted flag survives restart. |
+| Per-job `pause` / `resume` (ranges) | ✅ 07-07 | ➖ | ➖ | `pause 447-448` → `Paused`; scheduler **skips** them (killing the running job started nothing while both paused); `resume` → `Queued` and runs. Errors on running (pause)/non-paused (resume)/missing while continuing (exit 1). Shows in default `list`. |
+| `watch` from-now default + `--from-start`/`-a` | ✅ 07-07 | ➖ | ➖ | Default watch on a job mid-output showed only new lines (LINE-5..8), while `cat` had all 8; `--from-start` and the `-a` alias replayed the whole log (LINE-1..8). |
+| `info` elapsed | ✅ 07-07 | ➖ | ➖ | `elapsed` row: `-` while queued, live (`4s`) while running, fixed (`24s` = finished−started) once terminal. |
 
-- [x] **Multi-id kill (Windows 2026-06-28):** `kill 343 344-346 347 999999`
-      expanded the range and processed each id by its current state (running →
-      `Killed`, queued → `Dequeued`), reported the already-killed id and the
-      missing id as `[ERROR]` while continuing, and exited 1.
-- [x] **Multi-id priority (Windows 2026-06-28):** `priority 348 349-351 999999 20`
-      took the trailing `20` as the value and set the queued range to priority 20;
-      it errored on the running id (`not queued`) and the missing id while
-      continuing, and exited 1.
-- [x] **Multi-id rerun (Windows 2026-06-28):** `rerun 343-345 347 999999`
-      re-queued each `killed` source as a new job (354–357), left the sources
-      untouched (still `killed`), errored on the missing id while continuing, and
-      exited 1.
-- [x] **Execution-order list (Windows 2026-06-28):** default `list` showed the
-      running job first, then queued by priority desc / id asc (a job bumped to
-      priority 50 jumped ahead of the priority-20 and -0 queued jobs); `--by-id`
-      reverted to pure id order. The default view shows only running+queued;
-      `--all` / `--state` keep id (chronological) order regardless of `--by-id`
-      (so `--all` and `--all --by-id` produce the same output).
+The multi-id and execution-order rows are pure client-side logic (no `#[cfg]`
+branches), so Linux and Windows behave identically; their Windows runs (2026-06-28,
+against the installed daemon with throwaway jobs and a temporary `cpu-limit 1`)
+double as confirmation for both. The 2026-07-07 rows (pause/resume, watch
+from-now, info elapsed) are likewise `#[cfg]`-free — the pause gate lives in
+`take_next_runnable` / the daemon, the rest is client-side — so they are expected
+to behave identically on Linux/macOS, but have only been exercised on Windows so
+far. macOS remains the only fully unverified target — fill in its column once a
+machine is available.

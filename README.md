@@ -33,11 +33,16 @@ msc add -p 10 -- ./urgent.sh      # queue at higher priority so it runs before n
 msc list                          # running + queued jobs (use --all or --state for others)
 msc info 3                        # full details for job 3
 msc cat 3                         # print job 3's captured output (stdout + stderr)
-msc watch 3                       # follow a running job's output live; Ctrl+C stops watching, not the job
+msc watch 3                       # follow a job's output live from now on; Ctrl+C stops watching, not the job
+msc watch 3 --from-start          # ...replaying the whole log so far first
 msc watch                         # watch the sole running job, or list the running jobs to choose from
 msc priority 3 10                 # bump a queued job's priority so it jumps the queue
 msc rerun 3                       # re-queue a fresh copy of job 3 (same command, dir, env) at priority 0
 msc rerun 3 -p 10                 # re-queue job 3 at a chosen priority instead of the default 0
+msc pause                         # pause the scheduler: running jobs finish, no new ones start
+msc resume                        # resume scheduling
+msc pause 4 5-7                   # pull specific queued jobs out of the queue until resumed
+msc resume 4 5-7                  # put paused jobs back into the queue
 msc kill 3                        # stop a running job, or drop a queued one
 msc kill --all                    # stop every running job and drop every queued one
 msc remove 3                      # remove a finished job from the list
@@ -109,6 +114,25 @@ jobs are left in the list (use `clear` to prune those).
 ```bash
 msc kill --all   # stop all running jobs and clear the queue
 ```
+
+### Pausing
+
+`pause` holds work back without cancelling it, in two granularities:
+
+```bash
+msc pause        # pause the whole scheduler
+msc resume       # resume it
+msc pause 4 5-7  # pause specific queued jobs (ranges accepted)
+msc resume 4 5-7 # resume them
+```
+
+- **Whole scheduler** (`pause` with no id): jobs already running finish normally,
+  but no new job starts until `resume`. The pause is remembered across a daemon
+  restart, so scheduling stays halted until you explicitly resume.
+- **Specific jobs** (`pause <ids>`): only affects **queued** jobs — each is pulled
+  out of the queue (state `paused`) so the scheduler skips it, while the rest of
+  the queue keeps flowing. `resume <ids>` puts them back. A paused job still shows
+  in `msc list` and can be `kill`ed or `remove`d like any other pending job.
 
 ### Limiting CPU jobs
 

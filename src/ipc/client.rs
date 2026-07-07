@@ -17,11 +17,13 @@ use crate::{
 
 pub async fn run(settings: Settings, command: Command) -> anyhow::Result<()> {
     match command {
-        Command::Watch { id } => watch(&settings, id).await,
+        Command::Watch { id, from_start } => watch(&settings, id, from_start).await,
         Command::List { all, state, by_id } => list_jobs(&settings, all, &state, by_id).await,
         Command::Kill { ids, all: false } => kill_many(&settings, &ids).await,
         Command::Priority { args } => set_priority_many(&settings, &args).await,
         Command::Rerun { ids, priority } => rerun_many(&settings, &ids, priority).await,
+        Command::Pause { ids } => pause_or_resume(&settings, &ids, true).await,
+        Command::Resume { ids } => pause_or_resume(&settings, &ids, false).await,
         command => {
             let request = build_request(command)?;
             let mut conn = connect_or_spawn(&settings).await?;
@@ -57,6 +59,8 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
         Command::Kill { .. } => unreachable!("kill with ids is handled in run"),
         Command::Priority { .. } => unreachable!("priority is handled in run"),
         Command::Rerun { .. } => unreachable!("rerun is handled in run"),
+        Command::Pause { .. } => unreachable!("pause is handled in run"),
+        Command::Resume { .. } => unreachable!("resume is handled in run"),
         Command::Remove { id } => Request::Remove { id },
         Command::Clear => Request::Clear,
         Command::Devices => Request::GetDevices,
@@ -191,15 +195,63 @@ async fn rerun_many(settings: &Settings, id_args: &[String], priority: i32) -> a
     Ok(())
 }
 
+/// Pause or resume the scheduler (no ids) or specific jobs (one or more ids).
+///
+/// With no ids this sends a single global `PauseScheduler`/`ResumeScheduler`.
+/// With ids it expands ranges and sends one `PauseJob`/`ResumeJob` per id,
+/// continuing past errors like the other multi-id commands.
+async fn pause_or_resume(settings: &Settings, id_args: &[String], pause: bool) -> anyhow::Result<()> {
+    if id_args.is_empty() {
+        let request = if pause {
+            Request::PauseScheduler
+        } else {
+            Request::ResumeScheduler
+        };
+        let mut conn = connect_or_spawn(settings).await?;
+        protocol::write_msg(&mut conn, &request).await?;
+        let resp: Response = protocol::read_msg(&mut conn).await?;
+        drop(conn);
+        return render(resp).await;
+    }
+
+    let ids = parse_job_ids(id_args)?;
+    let mut had_error = false;
+    for id in ids {
+        let request = if pause {
+            Request::PauseJob { id }
+        } else {
+            Request::ResumeJob { id }
+        };
+        let mut conn = connect_or_spawn(settings).await?;
+        protocol::write_msg(&mut conn, &request).await?;
+        let resp: Response = protocol::read_msg(&mut conn).await?;
+        drop(conn);
+        match resp {
+            Response::Ok(msg) => println!("{msg}"),
+            Response::Error(msg) => {
+                eprintln!("[ERROR] {msg}");
+                had_error = true;
+            }
+            other => bail!("unexpected response to pause/resume: {other:?}"),
+        }
+    }
+    if had_error {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// Sort key for execution-order listing:
 ///   running jobs  (group 0) — by id
 ///   queued jobs   (group 1) — by descending priority then id (matches scheduler)
-///   terminal jobs (group 2) — by id
+///   paused jobs   (group 2) — by id
+///   terminal jobs (group 3) — by id
 fn execution_order_key(job: &Job) -> (u8, i64, u32) {
     match job.state {
         JobState::Running => (0, 0, job.id),
         JobState::Queued => (1, -(job.priority as i64), job.id),
-        _ => (2, 0, job.id),
+        JobState::Paused => (2, 0, job.id),
+        _ => (3, 0, job.id),
     }
 }
 
@@ -214,7 +266,10 @@ fn execution_order_key(job: &Job) -> (u8, i64, u32) {
 /// Ctrl+C only stops watching — the job keeps running, because it is a child of
 /// the daemon, not of this client process. `Info` already returns the job's log
 /// path and state, so we poll it and stream new bytes from the log file.
-async fn watch(settings: &Settings, id: Option<u32>) -> anyhow::Result<()> {
+///
+/// By default only output produced from now on is shown. `from_start` replays
+/// the whole log captured so far before following.
+async fn watch(settings: &Settings, id: Option<u32>, from_start: bool) -> anyhow::Result<()> {
     let id = match id {
         Some(id) => match resolve_watch_target(settings, id).await? {
             Some(id) => id,
@@ -227,7 +282,7 @@ async fn watch(settings: &Settings, id: Option<u32>) -> anyhow::Result<()> {
     };
 
     tokio::select! {
-        res = follow(settings, id) => res,
+        res = follow(settings, id, from_start) => res,
         _ = tokio::signal::ctrl_c() => {
             println!();
             eprintln!("(stopped watching job {id}; it keeps running)");
@@ -282,8 +337,18 @@ async fn pick_running_job(settings: &Settings) -> anyhow::Result<Option<u32>> {
 }
 
 /// Poll the job and stream new log bytes until it finishes.
-async fn follow(settings: &Settings, id: u32) -> anyhow::Result<()> {
+///
+/// Unless `from_start` is set, streaming begins at the current end of the log so
+/// only output produced from now on is shown (existing history is skipped).
+async fn follow(settings: &Settings, id: u32, from_start: bool) -> anyhow::Result<()> {
+    // Start at the current end of the log for the default "from now" behavior;
+    // `from_start` keeps the whole log by starting at offset 0.
     let mut pos: u64 = 0;
+    if !from_start {
+        if let Some(job) = fetch_job(settings, id).await? {
+            pos = current_log_len(&job.log_path).await;
+        }
+    }
     loop {
         let Some(job) = fetch_job(settings, id).await? else {
             eprintln!("(job {id} no longer exists)");
@@ -321,6 +386,12 @@ async fn drain_log(path: &std::path::Path, pos: &mut u64) -> anyhow::Result<()> 
         *pos += buf.len() as u64;
     }
     Ok(())
+}
+
+/// Current size of a job's log file in bytes, or 0 if it doesn't exist yet.
+/// Used as the starting offset when following only new output.
+async fn current_log_len(path: &std::path::Path) -> u64 {
+    tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0)
 }
 
 /// Fetch a job's current state via an `Info` request. `Ok(None)` means no such job.
@@ -379,7 +450,7 @@ async fn list_jobs(
         if all || !states.is_empty() {
             eprintln!("(no matching jobs)");
         } else {
-            eprintln!("(no running or queued jobs; pass --all to show every state)");
+            eprintln!("(no active jobs; pass --all to show every state)");
         }
         return Ok(());
     }
@@ -392,8 +463,8 @@ fn state_wanted(all: bool, states: &[StateFilter], state: &JobState) -> bool {
         return true;
     }
     if states.is_empty() {
-        // Default view: only the active jobs.
-        return matches!(state, JobState::Running | JobState::Queued);
+        // Default view: only the active jobs (running, queued, or paused).
+        return matches!(state, JobState::Running | JobState::Queued | JobState::Paused);
     }
     states.iter().any(|f| filter_matches(*f, state))
 }
@@ -402,6 +473,7 @@ fn filter_matches(filter: StateFilter, state: &JobState) -> bool {
     matches!(
         (filter, state),
         (StateFilter::Queued, JobState::Queued)
+            | (StateFilter::Paused, JobState::Paused)
             | (StateFilter::Running, JobState::Running)
             | (StateFilter::Finished, JobState::Finished)
             | (StateFilter::Killed, JobState::Killed)
@@ -515,6 +587,14 @@ fn print_job_details(job: &Job) -> anyhow::Result<()> {
     let exit = job.exit_code.map(|c| c.to_string()).unwrap_or_else(dash);
     let started = job.started_at.map(|t| fmt_local(t)).unwrap_or_else(dash);
     let finished = job.finished_at.map(|t| fmt_local(t)).unwrap_or_else(dash);
+    // Elapsed run time: live for a running job (now - started), final for a
+    // terminal one (finished - started); a job that never started shows "-".
+    let elapsed = match (job.started_at, job.finished_at) {
+        (Some(start), Some(end)) => Some(end - start),
+        (Some(start), None) if job.state == JobState::Running => Some(Utc::now() - start),
+        _ => None,
+    };
+    let elapsed = elapsed.map(fmt_duration).unwrap_or_else(dash);
 
     let mut table = Table::new();
     table
@@ -531,7 +611,8 @@ fn print_job_details(job: &Job) -> anyhow::Result<()> {
         .add_row(vec!["log".to_string(), job.log_path.display().to_string()])
         .add_row(vec!["enqueued".to_string(), fmt_local(job.enqueued_at)])
         .add_row(vec!["started".to_string(), started])
-        .add_row(vec!["finished".to_string(), finished]);
+        .add_row(vec!["finished".to_string(), finished])
+        .add_row(vec!["elapsed".to_string(), elapsed]);
 
     // Wrap the value column onto multiple lines so a long command/path doesn't
     // blow the table past the terminal width. When output isn't a terminal
@@ -600,6 +681,24 @@ fn fmt_local(t: DateTime<Utc>) -> String {
     t.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+/// Human-readable elapsed time, showing only the significant units, e.g.
+/// `5s`, `2m 3s`, `1h 2m 3s`, `1d 2h 3m 4s`. Negative spans clamp to `0s`.
+fn fmt_duration(d: chrono::Duration) -> String {
+    let secs = d.num_seconds().max(0);
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    let (hours, rem) = (rem / 3_600, rem % 3_600);
+    let (mins, s) = (rem / 60, rem % 60);
+    if days > 0 {
+        format!("{days}d {hours}h {mins}m {s}s")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m {s}s")
+    } else if mins > 0 {
+        format!("{mins}m {s}s")
+    } else {
+        format!("{s}s")
+    }
+}
+
 fn format_gpu_list(indices: &[u32]) -> String {
     let joined = indices
         .iter()
@@ -614,12 +713,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_view_is_running_and_queued() {
+    fn default_view_is_running_queued_and_paused() {
         assert!(state_wanted(false, &[], &JobState::Running));
         assert!(state_wanted(false, &[], &JobState::Queued));
+        assert!(state_wanted(false, &[], &JobState::Paused));
         assert!(!state_wanted(false, &[], &JobState::Finished));
         assert!(!state_wanted(false, &[], &JobState::Killed));
         assert!(!state_wanted(false, &[], &JobState::Failed));
+    }
+
+    #[test]
+    fn state_filter_matches_paused() {
+        let filters = [StateFilter::Paused];
+        assert!(state_wanted(false, &filters, &JobState::Paused));
+        assert!(!state_wanted(false, &filters, &JobState::Queued));
+        assert!(!state_wanted(false, &filters, &JobState::Running));
+    }
+
+    #[test]
+    fn fmt_duration_shows_significant_units() {
+        use chrono::Duration;
+        assert_eq!(fmt_duration(Duration::seconds(5)), "5s");
+        assert_eq!(fmt_duration(Duration::seconds(123)), "2m 3s");
+        assert_eq!(fmt_duration(Duration::seconds(3723)), "1h 2m 3s");
+        assert_eq!(fmt_duration(Duration::seconds(93784)), "1d 2h 3m 4s");
+        // Negative spans clamp to zero.
+        assert_eq!(fmt_duration(Duration::seconds(-10)), "0s");
     }
 
     #[test]

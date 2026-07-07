@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum JobState {
     Queued,
+    /// Held out of the queue by `msc pause <id>`; ignored by the scheduler until
+    /// `msc resume <id>` puts it back to `Queued`.
+    Paused,
     Running,
     Finished,
     Killed,
@@ -21,6 +24,7 @@ impl JobState {
     pub fn as_str(&self) -> &'static str {
         match self {
             JobState::Queued => "queued",
+            JobState::Paused => "paused",
             JobState::Running => "running",
             JobState::Finished => "finished",
             JobState::Killed => "killed",

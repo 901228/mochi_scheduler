@@ -48,6 +48,18 @@ pub enum Request {
         id: u32,
     },
     Clear,
+    /// Globally pause the scheduler: running jobs finish, no new jobs start.
+    PauseScheduler,
+    /// Resume a globally paused scheduler.
+    ResumeScheduler,
+    /// Pull a single queued job out of the queue until it is resumed.
+    PauseJob {
+        id: u32,
+    },
+    /// Put a paused job back into the queue.
+    ResumeJob {
+        id: u32,
+    },
     Shutdown,
     /// Query the GPU devices detected by the daemon at startup.
     GetDevices,

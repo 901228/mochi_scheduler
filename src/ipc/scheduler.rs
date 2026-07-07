@@ -50,6 +50,23 @@ pub enum SetPriorityOutcome {
     NotFound,
 }
 
+pub enum PauseJobOutcome {
+    Paused,
+    /// The job is already paused, so pausing again is a no-op.
+    AlreadyPaused,
+    /// The job exists but isn't queued (running or terminal), so it can't be
+    /// pulled out of the queue. Carries the current state for the message.
+    NotQueued(&'static str),
+    NotFound,
+}
+
+pub enum ResumeJobOutcome {
+    Resumed,
+    /// The job isn't paused (queued/running/terminal). Carries the current state.
+    NotPaused(&'static str),
+    NotFound,
+}
+
 /// What `cancel_all` touched: the running jobs whose kill switch the daemon must
 /// still fire, and how many queued jobs were dropped.
 pub struct CancelAll {
@@ -67,6 +84,11 @@ pub struct AppState {
     /// keeps older state files loadable.
     #[serde(default)]
     cpu_limit: Option<u32>,
+    /// When true the scheduler starts no new jobs (running ones finish normally)
+    /// until `msc resume`. Persisted so a pause survives a daemon restart;
+    /// `serde(default)` keeps older state files loadable.
+    #[serde(default)]
+    paused: bool,
 }
 
 /// recovery app state from disk
@@ -199,6 +221,59 @@ impl AppState {
         self.cpu_limit = limit;
     }
 
+    /// Whether the scheduler is globally paused.
+    pub fn is_paused(&self) -> bool {
+        self.paused
+    }
+
+    /// Globally pause the scheduler. Returns true if this changed the state
+    /// (false if it was already paused).
+    pub fn pause_scheduler(&mut self) -> bool {
+        if self.paused {
+            false
+        } else {
+            self.paused = true;
+            true
+        }
+    }
+
+    /// Resume a globally paused scheduler. Returns true if this changed the state
+    /// (false if it wasn't paused).
+    pub fn resume_scheduler(&mut self) -> bool {
+        if self.paused {
+            self.paused = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Pull a single queued job out of the queue so the scheduler skips it until
+    /// it is resumed. Only queued jobs can be paused.
+    pub fn pause_job(&mut self, id: u32) -> PauseJobOutcome {
+        match self.jobs.get_mut(&id) {
+            None => PauseJobOutcome::NotFound,
+            Some(job) if job.state == JobState::Queued => {
+                job.state = JobState::Paused;
+                PauseJobOutcome::Paused
+            }
+            Some(job) if job.state == JobState::Paused => PauseJobOutcome::AlreadyPaused,
+            Some(job) => PauseJobOutcome::NotQueued(job.state.as_str()),
+        }
+    }
+
+    /// Put a paused job back into the queue. Only paused jobs can be resumed.
+    pub fn resume_job(&mut self, id: u32) -> ResumeJobOutcome {
+        match self.jobs.get_mut(&id) {
+            None => ResumeJobOutcome::NotFound,
+            Some(job) if job.state == JobState::Paused => {
+                job.state = JobState::Queued;
+                ResumeJobOutcome::Resumed
+            }
+            Some(job) => ResumeJobOutcome::NotPaused(job.state.as_str()),
+        }
+    }
+
     /// Pick the next queued job that fits the free GPU pool, reserve its GPUs,
     /// mark it running, and return its run spec.
     ///
@@ -210,6 +285,10 @@ impl AppState {
     /// CPU jobs is below `cpu_limit`. Returns `None` when nothing fits, so the
     /// daemon can call this repeatedly to fill all available capacity.
     pub fn take_next_runnable(&mut self, gpu_total: u32) -> Option<RunSpec> {
+        // A globally paused scheduler starts nothing new; running jobs finish.
+        if self.paused {
+            return None;
+        }
         let free = self.free_gpus(gpu_total);
         let cpu_has_room = self
             .cpu_limit
@@ -267,7 +346,8 @@ impl AppState {
             None => KillOutcome::NotFound,
             Some(job) => match job.state {
                 JobState::Running => KillOutcome::Running,
-                JobState::Queued => {
+                // A queued or paused job has no process yet; drop it immediately.
+                JobState::Queued | JobState::Paused => {
                     job.state = JobState::Killed;
                     job.finished_at = Some(Utc::now());
                     KillOutcome::Dequeued
@@ -301,7 +381,8 @@ impl AppState {
         for job in self.jobs.values_mut() {
             match job.state {
                 JobState::Running => running.push(job.id),
-                JobState::Queued => {
+                // Queued and paused jobs are both pending; drop them immediately.
+                JobState::Queued | JobState::Paused => {
                     job.state = JobState::Killed;
                     job.finished_at = Some(now);
                     dequeued += 1;
@@ -781,6 +862,93 @@ mod tests {
     fn rerun_missing_job_returns_none() {
         let mut s = AppState::default();
         assert!(s.rerun(&log_dir(), 42, 0).is_none());
+    }
+
+    #[test]
+    fn pause_scheduler_stops_new_jobs_and_resume_restarts_them() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a"); // 0
+        enqueue(&mut s, "b"); // 1
+
+        assert!(s.pause_scheduler()); // first pause changes state
+        assert!(!s.pause_scheduler()); // already paused
+        assert!(s.is_paused());
+        // While paused the scheduler starts nothing, even with queued jobs.
+        assert!(s.take_next_runnable(0).is_none());
+        assert_eq!(s.get(0).unwrap().state, JobState::Queued);
+
+        assert!(s.resume_scheduler()); // resume changes state
+        assert!(!s.resume_scheduler()); // wasn't paused
+        assert!(!s.is_paused());
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 0);
+    }
+
+    #[test]
+    fn pause_job_removes_from_queue_and_resume_requeues() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a"); // 0
+        enqueue(&mut s, "b"); // 1
+
+        // Pausing job 0 pulls it out of scheduling; job 1 runs first instead.
+        assert!(matches!(s.pause_job(0), PauseJobOutcome::Paused));
+        assert_eq!(s.get(0).unwrap().state, JobState::Paused);
+        assert!(matches!(s.pause_job(0), PauseJobOutcome::AlreadyPaused));
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 1);
+        // Job 0 stays out of the queue while paused.
+        assert!(s.take_next_runnable(0).is_none());
+
+        // Resuming puts it back so it can run.
+        assert!(matches!(s.resume_job(0), ResumeJobOutcome::Resumed));
+        assert_eq!(s.get(0).unwrap().state, JobState::Queued);
+        assert_eq!(s.take_next_runnable(0).unwrap().id, 0);
+    }
+
+    #[test]
+    fn pause_and_resume_job_cover_non_applicable_and_missing() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a"); // 0
+        s.take_next_runnable(0); // 0 running
+
+        // A running job can't be paused; a queued job isn't paused to resume.
+        assert!(matches!(s.pause_job(0), PauseJobOutcome::NotQueued("running")));
+        assert!(matches!(s.pause_job(99), PauseJobOutcome::NotFound));
+        let q = enqueue(&mut s, "b"); // 1, queued
+        assert!(matches!(s.resume_job(q), ResumeJobOutcome::NotPaused("queued")));
+        assert!(matches!(s.resume_job(99), ResumeJobOutcome::NotFound));
+    }
+
+    #[test]
+    fn kill_and_cancel_all_drop_paused_jobs() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a"); // 0
+        enqueue(&mut s, "b"); // 1
+        s.pause_job(0);
+        s.pause_job(1);
+
+        // A single kill drops a paused job like a queued one.
+        assert!(matches!(s.request_kill(0), KillOutcome::Dequeued));
+        assert_eq!(s.get(0).unwrap().state, JobState::Killed);
+
+        // cancel_all also sweeps the remaining paused job.
+        let outcome = s.cancel_all();
+        assert_eq!(outcome.dequeued, 1);
+        assert_eq!(s.get(1).unwrap().state, JobState::Killed);
+    }
+
+    #[test]
+    fn paused_survives_save_and_load() {
+        let mut s = AppState::default();
+        enqueue(&mut s, "a"); // 0
+        s.pause_scheduler();
+        s.pause_job(0);
+        let path = temp_state_file();
+        s.save(&path).unwrap();
+
+        let loaded = AppState::load(&path).unwrap();
+        assert!(loaded.is_paused());
+        assert_eq!(loaded.get(0).unwrap().state, JobState::Paused);
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
