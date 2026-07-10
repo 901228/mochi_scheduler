@@ -200,6 +200,49 @@ For tqdm specifically, `tqdm(..., ascii=True)` draws the bar with ASCII and
 sidesteps the encoding issue entirely; `tqdm(..., disable=None)` auto-hides the
 bar when the output isn't a terminal.
 
+### A rich progress bar doesn't show up in `msc watch`
+
+[rich](https://github.com/Textualize/rich) detects that its output is not a
+terminal — a job's output is captured to a log file — and by default **strips
+control codes and disables animations**, so the progress bar never gets written
+to the log. `msc watch` then has nothing to stream. (This is a different problem
+from the tqdm garbling above, and has a different fix.)
+
+Force rich to treat the captured output as an interactive terminal by
+configuring the `Console` you hand to `Progress`:
+
+```python
+from rich.console import Console
+from rich.progress import Progress
+
+console = Console(
+    force_terminal=True,      # emit ANSI control codes even though it isn't a tty
+    force_interactive=True,   # enable the live animation (progress bar)
+    legacy_windows=False,     # Windows: emit ANSI cursor moves instead of Win32 API
+    width=120,                # optional: pin a width (see the wrapping note below)
+)
+with Progress(console=console) as progress:
+    ...
+```
+
+- `force_terminal` + `force_interactive` are enough for a **single** progress
+  bar (it redraws in place with a carriage return).
+- `legacy_windows=False` is required on **Windows for multi-row** progress
+  (several tasks, or a bar plus other live rows). Multi-row redraws rely on
+  ANSI *cursor-up* escapes; without this, Windows rich falls back to the Win32
+  console API — which does nothing when written to a file — so each refresh
+  **stacks** onto new lines instead of updating in place.
+- **Width:** when the output isn't a terminal rich can't detect its width and
+  assumes 80 columns (or `COLUMNS`) to compute line wrapping and how far to move
+  the cursor up. If the terminal you run `msc watch` in is *narrower* than that,
+  the cursor math is off and the display garbles — pin a `width=` that your watch
+  terminal comfortably fits, and use a VT-capable terminal (Windows Terminal is
+  fine; the classic `conhost` is not).
+
+View the result with `msc watch` (which replays the ANSI stream live so the bar
+animates). `msc cat` dumps every captured frame at once, so a progress log looks
+like a pile of overlapping redraws there — that's expected.
+
 ## License
 
 MIT

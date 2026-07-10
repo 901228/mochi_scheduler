@@ -232,8 +232,39 @@ runs `daemon::run`, everything else runs `client::run`.
 
 - The daemon currently prints received requests to stdout (`handle_conn`) — debug
   noise, not a feature.
-- `MOCHI_HOME` is the intended mechanism for test isolation: point it at a temp
-  dir to get a fresh queue and socket.
+
+### Testing against an isolated daemon (do not touch the user's real queue)
+
+There is **one daemon per user** and the socket name is keyed on the
+**username**, not `MOCHI_HOME` (`settings.rs` builds `mochi-<USER>.sock` from
+`USER`/`USERNAME`). So `MOCHI_HOME` **alone does not isolate** the daemon: a
+client with a fresh `MOCHI_HOME` still connects to the *existing* per-user
+daemon over the same socket, and any test jobs land in the user's real queue.
+
+To get a genuinely separate, throwaway daemon, override **both** env vars so the
+socket *and* the data dir differ:
+
+```bash
+USERNAME=mochitest MOCHI_HOME=<scratch>/mochihome  msc add -- <test cmd>   # spawns an isolated daemon
+USERNAME=mochitest MOCHI_HOME=<scratch>/mochihome  msc list
+```
+
+(On Unix set `USER` instead of `USERNAME`.) The client auto-spawns the isolated
+daemon; it inherits these env vars, so its socket is `mochi-mochitest.sock` and
+its state/logs live under the scratch dir — fully disjoint from the real queue.
+
+**Always shut the isolated daemon down when finished**, or it lingers as a second
+`msc __daemon` process:
+
+```bash
+USERNAME=mochitest MOCHI_HOME=<scratch>/mochihome  msc shutdown
+```
+
+Then verify only the user's real daemon remains (`Get-CimInstance Win32_Process
+-Filter "Name='msc.exe'"` on Windows / `pgrep -af 'msc __daemon'` on Unix) — and
+**never** force-kill an `msc __daemon` process, since you cannot tell the user's
+real daemon from a test one by PID alone, and killing the real one disrupts their
+queue.
 
 ## Testing checklist
 
