@@ -67,6 +67,16 @@ pub enum ResumeJobOutcome {
     NotFound,
 }
 
+pub enum RestartOutcome {
+    /// The job is running; the restart intent was recorded and the daemon should
+    /// fire its kill switch. The run task re-queues it once the process ends.
+    Restarting,
+    /// The job exists but isn't running, so there is no process to restart.
+    /// Carries the current state for the message.
+    NotRunning(&'static str),
+    NotFound,
+}
+
 /// What `cancel_all` touched: the running jobs whose kill switch the daemon must
 /// still fire, and how many queued jobs were dropped.
 pub struct CancelAll {
@@ -84,6 +94,11 @@ pub struct AppState {
     /// keeps older state files loadable.
     #[serde(default)]
     cpu_limit: Option<u32>,
+    /// Ids of running jobs the user asked to `restart`. Transient runtime state,
+    /// not persisted (`serde(skip)`): when such a job's process ends, its run task
+    /// re-queues it in place instead of finishing it.
+    #[serde(skip)]
+    restart_requested: BTreeSet<u32>,
 }
 
 /// recovery app state from disk
@@ -327,6 +342,44 @@ impl AppState {
                 RunResult::Killed => job.state = JobState::Killed,
                 RunResult::SpawnFailed => job.state = JobState::Failed,
             }
+        }
+    }
+
+    /// Record intent to restart a running job. The daemon then fires the job's
+    /// kill switch; when its process ends, `finish_or_restart` re-queues it
+    /// instead of finishing it. Only running jobs can be restarted (queued jobs
+    /// are already pending; terminal ones should be `rerun` as fresh jobs).
+    pub fn request_restart(&mut self, id: u32) -> RestartOutcome {
+        match self.jobs.get(&id) {
+            None => RestartOutcome::NotFound,
+            Some(job) if job.state == JobState::Running => {
+                self.restart_requested.insert(id);
+                RestartOutcome::Restarting
+            }
+            Some(job) => RestartOutcome::NotRunning(job.state.as_str()),
+        }
+    }
+
+    /// Called by the run task when a job's process ends. If a restart was
+    /// requested for this job, reset it to a fresh `Queued` state (same id and
+    /// log file, which the next run truncates) and return `true`; otherwise
+    /// finish it normally and return `false`. Consuming the intent under the same
+    /// lock that `request_restart` sets it makes the choice race-free: the intent
+    /// is only ever set while the job is running, i.e. before this runs.
+    pub fn finish_or_restart(&mut self, id: u32, result: RunResult) -> bool {
+        if self.restart_requested.remove(&id) {
+            if let Some(job) = self.jobs.get_mut(&id) {
+                job.state = JobState::Queued;
+                job.started_at = None;
+                job.finished_at = None;
+                job.exit_code = None;
+                // Release its GPUs; the scheduler reassigns on the next run.
+                job.assigned_gpus.clear();
+            }
+            true
+        } else {
+            self.finish(id, result);
+            false
         }
     }
 
@@ -911,6 +964,55 @@ mod tests {
         let q = enqueue(&mut s, "b"); // 1, queued
         assert!(matches!(s.resume_job(q), ResumeJobOutcome::NotPaused("queued")));
         assert!(matches!(s.resume_job(99), ResumeJobOutcome::NotFound));
+    }
+
+    #[test]
+    fn restart_requeues_a_running_job_in_place() {
+        let mut s = AppState::default();
+        enqueue_gpu(&mut s, "a", 1); // 0
+        let spec = s.take_next_runnable(2).unwrap(); // 0 running, holds GPU 0
+        assert_eq!(spec.id, 0);
+        assert_eq!(s.get(0).unwrap().assigned_gpus, vec![0]);
+
+        // Requesting a restart records the intent but leaves the job running
+        // until its process actually ends.
+        assert!(matches!(s.request_restart(0), RestartOutcome::Restarting));
+        assert_eq!(s.get(0).unwrap().state, JobState::Running);
+
+        // When the run task reports the (killed) process, the job is re-queued
+        // in place rather than finished: same id, GPUs released, run fields reset.
+        assert!(s.finish_or_restart(0, RunResult::Killed));
+        let j = s.get(0).unwrap();
+        assert_eq!(j.state, JobState::Queued);
+        assert!(j.started_at.is_none());
+        assert!(j.finished_at.is_none());
+        assert!(j.exit_code.is_none());
+        assert!(j.assigned_gpus.is_empty());
+
+        // It runs again with a fresh GPU assignment.
+        assert_eq!(s.take_next_runnable(2).unwrap().id, 0);
+
+        // A second finish without a pending restart terminates it normally.
+        assert!(!s.finish_or_restart(0, RunResult::Exited(Some(0))));
+        assert_eq!(s.get(0).unwrap().state, JobState::Finished);
+    }
+
+    #[test]
+    fn request_restart_rejects_non_running_and_missing_jobs() {
+        let mut s = AppState::default();
+        let id = enqueue(&mut s, "a"); // 0, queued
+        assert!(matches!(
+            s.request_restart(id),
+            RestartOutcome::NotRunning("queued")
+        ));
+        assert!(matches!(s.request_restart(99), RestartOutcome::NotFound));
+
+        s.take_next_runnable(0);
+        s.finish(id, RunResult::Exited(Some(0))); // now terminal
+        assert!(matches!(
+            s.request_restart(id),
+            RestartOutcome::NotRunning("finished")
+        ));
     }
 
     #[test]

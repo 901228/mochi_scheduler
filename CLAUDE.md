@@ -54,10 +54,10 @@ one down first.
 ### CLI subcommands (`msc <cmd>`)
 `add [-l label] [-g N] [-p N] <argv...>`, `list [-a|--all] [-s|--state S]... [--by-id]`,
 `info <id>`, `cat <id>`, `watch [<id>] [-a|--from-start]`, `kill <ids...> | kill --all`,
-`priority <ids...> <n>`, `rerun <ids...> [-p N]`, `pause [<ids...>]`,
-`resume [<ids...>]`, `remove <id>`, `clear`, `config <setting>`, `shutdown`. The
-hidden `__daemon` subcommand runs the background process and is not meant to be
-called directly.
+`priority <ids...> <n>`, `rerun <ids...> [-p N]`, `restart <ids...>`,
+`pause [<ids...>]`, `resume [<ids...>]`, `remove <id>`, `clear`,
+`config <setting>`, `shutdown`. The hidden `__daemon` subcommand runs the
+background process and is not meant to be called directly.
 
 `list` shows running, queued, and paused jobs by default; `--all` shows every
 state and `--state <S>` (repeatable, mutually exclusive with `--all`) shows
@@ -68,7 +68,7 @@ then paused jobs); `--by-id` reverts that view to id-order. The `--all` and `--s
 sorting are **client-side** (the daemon still returns all jobs), so the `List`
 protocol is unchanged.
 
-`kill`, `priority`, and `rerun` all accept **multiple ids and ranges**: plain
+`kill`, `priority`, `rerun`, and `restart` all accept **multiple ids and ranges**: plain
 numbers (`12 13 14`) or `start-end` ranges (`12-15` expands to 12, 13, 14, 15),
 or a mix (`12 15-18`). Duplicates are silently deduplicated. Each id is processed
 independently — errors are printed but processing continues for the remaining ids.
@@ -83,6 +83,22 @@ the source** — it defaults to `0`, or to `-p N` when given (the client always
 sends a priority; clap's `default_value_t = 0` supplies the default). This lets a
 rerun start at normal priority even if the original had been bumped. The source
 job's record is left untouched; works for a job in any state.
+
+`restart <ids...>` restarts a **running** job *in place* — same id and log file,
+unlike `rerun` which makes a fresh job. `Request::Restart { id }` →
+`AppState::request_restart`: for a running job it records the id in a transient
+`restart_requested` set (`#[serde(skip)]`, not persisted) and the daemon fires
+the job's kill switch. The process must fully die before the job can run again
+(otherwise the scheduler could start a second instance / double-book its GPUs),
+so the re-queue is deferred: the scheduler's run task now calls
+`finish_or_restart` instead of `finish`, which — if the id is in the set —
+resets the job to `Queued` (clears `started_at`/`finished_at`/`exit_code`/
+`assigned_gpus`) rather than marking it terminal, then `notify` restarts it. The
+next run's `File::create` truncates the log, so a restart starts with a clean
+log. Setting the intent and consuming it both happen under the state `Mutex`, and
+the intent is only ever set while the job is running, so the finish-vs-restart
+choice is race-free. Non-running ids error (`NotRunning(state)`, with a `rerun`
+hint) while processing continues for the rest, like `kill`.
 
 `kill --all` cancels every *active* job at once: running jobs get their kill
 switch fired (then become `Killed` via `finish`, like single `kill`) and queued
@@ -304,6 +320,7 @@ applicable on this OS.
 | Multi-id `priority` (ranges) | ✅ 06-28 | ✅ | ➖ | `priority 348 349-351 999999 20`: trailing arg is the value, sets the queued range; errors on running (`not queued`)/missing while continuing, exits 1. |
 | Multi-id `rerun` (ranges) | ✅ 06-28 | ✅ | ➖ | `rerun 343-345 347 999999`: re-queues each source as a new job, sources untouched, errors on missing while continuing, exits 1. |
 | Execution-order `list` + `--by-id` | ✅ 06-28 | ✅ | ➖ | Default view: running first, then queued by priority desc / id asc; `--by-id` → pure id order. `--all` / `--state` always id (chronological) order regardless of `--by-id`. |
+| `restart` (running, in place) | ✅ 07-12 | ➖ | ➖ | `restart 0` on a running counting job: same id, `started`/`elapsed` reset, log truncated back to line 1, keeps running. Errors on queued/terminal/missing (with a `rerun` hint) while continuing; multi-id + ranges like `kill`. GPUs released and reassigned on the re-run. |
 | Bulk `pause` / `resume` (no id) | ✅ 07-12 | ➖ | ➖ | `pause` (no id) → every `queued` job becomes `paused` ("Paused N queued job(s)"); scheduler starts nothing new. `resume` (no id) with nothing else queued re-queues them all straight away; with other jobs still queued it prints a `[WARN]` and prompts y/N (`n` cancels, `y` resumes all). No global paused flag — pausing then adding a job lets the new job run. |
 | Per-job `pause` / `resume` (ranges) | ✅ 07-07 | ➖ | ➖ | `pause 447-448` → `Paused`; scheduler **skips** them (killing the running job started nothing while both paused); `resume` → `Queued` and runs. Errors on running (pause)/non-paused (resume)/missing while continuing (exit 1). Shows in default `list`. |
 | `watch` from-now default + `--from-start`/`-a` | ✅ 07-07 | ➖ | ➖ | Default watch on a job mid-output showed only new lines (LINE-5..8), while `cat` had all 8; `--from-start` and the `-a` alias replayed the whole log (LINE-1..8). |

@@ -15,8 +15,8 @@ use tokio::sync::{Notify, oneshot};
 use super::{
     protocol::{self, Request, Response},
     scheduler::{
-        AppState, KillOutcome, PauseJobOutcome, RemoveOutcome, ResumeJobOutcome, RunResult, RunSpec,
-        SetPriorityOutcome,
+        AppState, KillOutcome, PauseJobOutcome, RemoveOutcome, RestartOutcome, ResumeJobOutcome,
+        RunResult, RunSpec, SetPriorityOutcome,
     },
 };
 use crate::{gpu, process_tree, settings::Settings};
@@ -229,6 +229,25 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
             };
             daemon.notify.notify_one();
             Response::Ok(format!("Re-queued job {id} as job {new_id}"))
+        }
+        Request::Restart { id } => {
+            let outcome = daemon.state.lock().unwrap().request_restart(id);
+            match outcome {
+                RestartOutcome::Restarting => {
+                    // Fire the kill switch; the run task re-queues the job (rather
+                    // than finishing it) once its process actually exits, then the
+                    // scheduler starts it again. If the process already ended, the
+                    // send is a harmless no-op and the intent is cleared then.
+                    if let Some(tx) = daemon.kills.lock().unwrap().remove(&id) {
+                        let _ = tx.send(());
+                    }
+                    Response::Ok(format!("Restarting job {id}"))
+                }
+                RestartOutcome::NotRunning(state) => Response::Error(format!(
+                    "Job {id} is {state}, not running; restart only applies to running jobs (use `rerun` to re-queue a finished job)"
+                )),
+                RestartOutcome::NotFound => Response::Error(format!("No such job (id {id})")),
+            }
         }
         Request::Remove { id } => {
             let mut state = daemon.state.lock().unwrap();
@@ -496,7 +515,9 @@ async fn scheduler(daemon: Daemon) {
                 daemon.kills.lock().unwrap().remove(&spec.id);
                 {
                     let mut state = daemon.state.lock().unwrap();
-                    state.finish(spec.id, result);
+                    // Re-queues the job in place if a restart was requested,
+                    // otherwise marks it terminal.
+                    state.finish_or_restart(spec.id, result);
                 }
                 persist(&daemon);
                 daemon.notify.notify_one();

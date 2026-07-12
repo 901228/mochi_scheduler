@@ -39,6 +39,7 @@ msc watch                         # watch the sole running job, or list the runn
 msc priority 3 10                 # bump a queued job's priority so it jumps the queue
 msc rerun 3                       # re-queue a fresh copy of job 3 (same command, dir, env) at priority 0
 msc rerun 3 -p 10                 # re-queue job 3 at a chosen priority instead of the default 0
+msc restart 3                     # restart a running job in place: kill it and re-run the same job
 msc pause                         # pause every queued job; running ones finish, nothing new starts
 msc resume                        # put all paused jobs back into the queue
 msc pause 4 5-7                   # pull specific queued jobs out of the queue until resumed
@@ -114,6 +115,20 @@ jobs are left in the list (use `clear` to prune those).
 ```bash
 msc kill --all   # stop all running jobs and clear the queue
 ```
+
+### Restarting a running job
+
+`restart` stops a running job and immediately runs it again as the **same job**:
+
+```bash
+msc restart 3        # kill job 3's process tree and re-run it from the start
+msc restart 3 5-7    # multiple ids and ranges, like kill
+```
+
+The job keeps its id, priority, and log file (the log is truncated for the fresh
+run). Only **running** jobs can be restarted — for a finished job use `rerun`,
+which instead queues a brand-new copy (new id, new log). If a listed job isn't
+running, `restart` reports an error and moves on to the rest.
 
 ### Pausing
 

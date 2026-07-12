@@ -121,6 +121,18 @@ pub enum Command {
         priority: i32,
     },
 
+    /// Restart one or more running jobs in place: stop and re-run them.
+    ///
+    /// Each listed job's process is killed and the same job (same id and log
+    /// file) is re-queued to run again from the start. Only running jobs can be
+    /// restarted — use `rerun` to queue a fresh copy of a finished job. Accepts
+    /// multiple ids and ranges, e.g. `msc restart 12 15-18`.
+    Restart {
+        /// Job id(s) to restart. Accepts ranges like `12-15`.
+        #[arg(required = true, num_args = 1..)]
+        ids: Vec<String>,
+    },
+
     /// Pause every queued job, or pull specific queued jobs out of the queue.
     ///
     /// With no id, pauses all currently queued jobs at once (running jobs finish

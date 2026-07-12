@@ -22,6 +22,7 @@ pub async fn run(settings: Settings, command: Command) -> anyhow::Result<()> {
         Command::Kill { ids, all: false } => kill_many(&settings, &ids).await,
         Command::Priority { args } => set_priority_many(&settings, &args).await,
         Command::Rerun { ids, priority } => rerun_many(&settings, &ids, priority).await,
+        Command::Restart { ids } => restart_many(&settings, &ids).await,
         Command::Pause { ids } => pause_or_resume(&settings, &ids, true).await,
         Command::Resume { ids } => pause_or_resume(&settings, &ids, false).await,
         command => {
@@ -59,6 +60,7 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
         Command::Kill { .. } => unreachable!("kill with ids is handled in run"),
         Command::Priority { .. } => unreachable!("priority is handled in run"),
         Command::Rerun { .. } => unreachable!("rerun is handled in run"),
+        Command::Restart { .. } => unreachable!("restart is handled in run"),
         Command::Pause { .. } => unreachable!("pause is handled in run"),
         Command::Resume { .. } => unreachable!("resume is handled in run"),
         Command::Remove { id } => Request::Remove { id },
@@ -187,6 +189,31 @@ async fn rerun_many(settings: &Settings, id_args: &[String], priority: i32) -> a
                 had_error = true;
             }
             other => bail!("unexpected response to rerun: {other:?}"),
+        }
+    }
+    if had_error {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Restart multiple running jobs by id, continuing past errors and printing each
+/// result. Each job is stopped and re-queued in place (same id and log file).
+async fn restart_many(settings: &Settings, id_args: &[String]) -> anyhow::Result<()> {
+    let ids = parse_job_ids(id_args)?;
+    let mut had_error = false;
+    for id in ids {
+        let mut conn = connect_or_spawn(settings).await?;
+        protocol::write_msg(&mut conn, &Request::Restart { id }).await?;
+        let resp: Response = protocol::read_msg(&mut conn).await?;
+        drop(conn);
+        match resp {
+            Response::Ok(msg) => println!("{msg}"),
+            Response::Error(msg) => {
+                eprintln!("[ERROR] {msg}");
+                had_error = true;
+            }
+            other => bail!("unexpected response to restart: {other:?}"),
         }
     }
     if had_error {

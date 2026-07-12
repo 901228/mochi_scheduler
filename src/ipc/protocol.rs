@@ -44,6 +44,11 @@ pub enum Request {
         id: u32,
         priority: i32,
     },
+    /// Restart a running job in place: kill its process and re-queue the same job
+    /// (same id and log file) so it runs again.
+    Restart {
+        id: u32,
+    },
     Remove {
         id: u32,
     },
