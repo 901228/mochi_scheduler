@@ -55,8 +55,8 @@ one down first.
 `add [-l label] [-g N] [-p N] <argv...>`, `list [-a|--all] [-s|--state S]... [--by-id]`,
 `info <id>`, `cat <id>`, `watch [<id>] [-a|--from-start]`, `kill <ids...> | kill --all`,
 `priority <ids...> <n>`, `rerun <ids...> [-p N]`, `restart <ids...>`,
-`pause [<ids...>]`, `resume [<ids...>]`, `remove <id>`, `clear`,
-`config <setting>`, `shutdown`. The hidden `__daemon` subcommand runs the
+`label <id> <text>`, `pause [<ids...>]`, `resume [<ids...>]`, `remove <id>`,
+`clear`, `config <setting>`, `shutdown`. The hidden `__daemon` subcommand runs the
 background process and is not meant to be called directly.
 
 `list` shows running, queued, and paused jobs by default; `--all` shows every
@@ -112,6 +112,13 @@ ids or `--all` and treats them as mutually exclusive.
 (`SetPriorityOutcome::NotQueued`). The last positional argument is always the
 priority value; all preceding arguments are job ids (ranges accepted). `add -p N`
 sets a job's priority at enqueue time.
+
+`label <id> <text>` sets or changes a job's label (`Request::SetLabel` →
+`AppState::set_label`). Unlike the other job commands it takes a **single id**
+(a label identifies one job, so bulk-setting the same label is pointless) and
+works in **any state** (a label is just metadata). An empty string clears it —
+the client maps `""` to `None`; the daemon replies "Cleared job N label" vs
+"Set job N label to '…'". Missing id errors.
 
 `pause` / `resume` have two granularities selected by whether ids are given
 (clap `ids: Vec<String>` with `num_args = 0..`; the client routes empty-vs-ids in
@@ -321,6 +328,7 @@ applicable on this OS.
 | Multi-id `priority` (ranges) | ✅ 06-28 | ✅ | ➖ | `priority 348 349-351 999999 20`: trailing arg is the value, sets the queued range; errors on running (`not queued`)/missing while continuing, exits 1. |
 | Multi-id `rerun` (ranges) | ✅ 06-28 | ✅ | ➖ | `rerun 343-345 347 999999`: re-queues each source as a new job, sources untouched, errors on missing while continuing, exits 1. |
 | Execution-order `list` + `--by-id` | ✅ 06-28 | ✅ | ➖ | Default view: running first, then queued by priority desc / id asc; `--by-id` → pure id order. `--all` / `--state` always id (chronological) order regardless of `--by-id`. |
+| `label` set / change / clear | ✅ 07-12 | ➖ | ➖ | `label 0 renamed-run` set it (shown in `info`, incl. while running); `label 0 ""` cleared it (blank row); missing id → `[ERROR]` exit 1. Single id only. |
 | `restart` (running, in place) | ✅ 07-12 | ➖ | ➖ | `restart 0` on a running counting job: same id, `started`/`elapsed` reset, log truncated back to line 1, keeps running. Errors on queued/terminal/missing (with a `rerun` hint) while continuing; multi-id + ranges like `kill`. GPUs released and reassigned on the re-run. |
 | Bulk `pause` / `resume` (no id) | ✅ 07-12 | ➖ | ➖ | `pause` (no id) → every `queued` job becomes `paused` ("Paused N queued job(s)"); scheduler starts nothing new. `resume` (no id) with nothing else queued re-queues them all straight away; with other jobs still queued it prints a `[WARN]` and prompts y/N (`n` cancels, `y` resumes all). No global paused flag — pausing then adding a job lets the new job run. |
 | Per-job `pause` / `resume` (ranges) | ✅ 07-07 | ➖ | ➖ | `pause 447-448` → `Paused`; scheduler **skips** them (killing the running job started nothing while both paused); `resume` → `Queued` and runs. Errors on running (pause)/non-paused (resume)/missing while continuing (exit 1). Shows in default `list`. |

@@ -205,6 +205,25 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
                 SetPriorityOutcome::NotFound => Response::Error(format!("No such job (id {id})")),
             }
         }
+        Request::SetLabel { id, label } => {
+            let (found, cleared) = {
+                let mut state = daemon.state.lock().unwrap();
+                let found = state.set_label(id, label.clone());
+                if found {
+                    if let Err(e) = state.save(&daemon.settings.state_file) {
+                        return Response::Error(format!("persisting state: {e}"));
+                    }
+                }
+                (found, label.is_none())
+            };
+            if !found {
+                Response::Error(format!("No such job (id {id})"))
+            } else if cleared {
+                Response::Ok(format!("Cleared job {id} label"))
+            } else {
+                Response::Ok(format!("Set job {id} label to '{}'", label.unwrap()))
+            }
+        }
         Request::Rerun { id, priority } => {
             let new_id = {
                 let mut state = daemon.state.lock().unwrap();

@@ -133,6 +133,18 @@ pub enum Command {
         ids: Vec<String>,
     },
 
+    /// Set or change a job's label.
+    ///
+    /// Works on a job in any state. Pass an empty string (`msc label 3 ""`) to
+    /// clear the label.
+    Label {
+        /// Job id.
+        id: u32,
+
+        /// New label. An empty string clears the label.
+        label: String,
+    },
+
     /// Pause every queued job, or pull specific queued jobs out of the queue.
     ///
     /// With no id, pauses all currently queued jobs at once (running jobs finish

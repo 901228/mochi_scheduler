@@ -37,6 +37,11 @@ pub enum Request {
         id: u32,
         priority: i32,
     },
+    /// Set or clear a job's label (`None` clears it). Works in any state.
+    SetLabel {
+        id: u32,
+        label: Option<String>,
+    },
     /// Re-queue an existing job as a new job, re-running its command. The fresh
     /// copy is enqueued at `priority` (defaults to 0 on the client side, not the
     /// source job's priority).

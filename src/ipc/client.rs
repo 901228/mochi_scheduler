@@ -63,6 +63,11 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
         Command::Restart { .. } => unreachable!("restart is handled in run"),
         Command::Pause { .. } => unreachable!("pause is handled in run"),
         Command::Resume { .. } => unreachable!("resume is handled in run"),
+        Command::Label { id, label } => Request::SetLabel {
+            id,
+            // An empty string clears the label.
+            label: if label.is_empty() { None } else { Some(label) },
+        },
         Command::Remove { id } => Request::Remove { id },
         Command::Clear => Request::Clear,
         Command::Devices => Request::GetDevices,

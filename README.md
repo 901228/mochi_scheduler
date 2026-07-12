@@ -40,6 +40,7 @@ msc priority 3 10                 # bump a queued job's priority so it jumps the
 msc rerun 3                       # re-queue a fresh copy of job 3 (same command, dir, env) at priority 0
 msc rerun 3 -p 10                 # re-queue job 3 at a chosen priority instead of the default 0
 msc restart 3                     # restart a running job in place: kill it and re-run the same job
+msc label 3 nightly               # set/change job 3's label (use "" to clear it)
 msc pause                         # pause every queued job; running ones finish, nothing new starts
 msc resume                        # put all paused jobs back into the queue
 msc pause 4 5-7                   # pull specific queued jobs out of the queue until resumed

@@ -400,6 +400,18 @@ impl AppState {
         }
     }
 
+    /// Set or clear a job's label (`None` clears it). Allowed in any state, since
+    /// a label is just metadata. Returns whether the job existed.
+    pub fn set_label(&mut self, id: u32, label: Option<String>) -> bool {
+        match self.jobs.get_mut(&id) {
+            Some(job) => {
+                job.label = label;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Change a queued job's priority. Only queued jobs can be re-prioritised; a
     /// running job has already started and a terminal one is done.
     pub fn set_priority(&mut self, id: u32, priority: i32) -> SetPriorityOutcome {
@@ -818,6 +830,25 @@ mod tests {
         assert!(matches!(s.set_priority(2, 10), SetPriorityOutcome::Updated));
         assert_eq!(s.take_next_runnable(0).unwrap().id, 2);
         assert_eq!(s.take_next_runnable(0).unwrap().id, 0);
+    }
+
+    #[test]
+    fn set_label_updates_clears_and_reports_missing() {
+        let mut s = AppState::default();
+        let id = enqueue(&mut s, "a"); // 0, no label
+        assert!(s.get(id).unwrap().label.is_none());
+
+        // Set a label (works even once running).
+        s.take_next_runnable(0);
+        assert!(s.set_label(id, Some("train".into())));
+        assert_eq!(s.get(id).unwrap().label.as_deref(), Some("train"));
+
+        // Clear it.
+        assert!(s.set_label(id, None));
+        assert!(s.get(id).unwrap().label.is_none());
+
+        // Missing job.
+        assert!(!s.set_label(99, Some("x".into())));
     }
 
     #[test]
