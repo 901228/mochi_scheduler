@@ -271,39 +271,37 @@ fn handle_request(request: Request, daemon: &Daemon) -> Response {
             daemon.notify.notify_one();
             Response::Ok(format!("CPU job limit set to {}", describe_cpu_limit(limit)))
         }
-        Request::PauseScheduler => {
-            let changed = {
+        Request::PauseAllQueued => {
+            let count = {
                 let mut state = daemon.state.lock().unwrap();
-                let changed = state.pause_scheduler();
+                let count = state.pause_all_queued();
                 if let Err(e) = state.save(&daemon.settings.state_file) {
                     return Response::Error(format!("persisting state: {e}"));
                 }
-                changed
+                count
             };
-            // No notify: pausing only stops new jobs; running ones finish on their own.
-            if changed {
-                Response::Ok(
-                    "Scheduler paused; running jobs finish, no new jobs start until `msc resume`".into(),
-                )
+            // No notify: pausing only removes queued jobs; running ones finish on their own.
+            if count == 0 {
+                Response::Ok("No queued jobs to pause".into())
             } else {
-                Response::Ok("Scheduler is already paused".into())
+                Response::Ok(format!("Paused {count} queued job(s)"))
             }
         }
-        Request::ResumeScheduler => {
-            let changed = {
+        Request::ResumeAllPaused => {
+            let count = {
                 let mut state = daemon.state.lock().unwrap();
-                let changed = state.resume_scheduler();
+                let count = state.resume_all_paused();
                 if let Err(e) = state.save(&daemon.settings.state_file) {
                     return Response::Error(format!("persisting state: {e}"));
                 }
-                changed
+                count
             };
-            // Wake the scheduler so it backfills any queued jobs held during the pause.
+            // Wake the scheduler so it can start the jobs put back into the queue.
             daemon.notify.notify_one();
-            if changed {
-                Response::Ok("Scheduler resumed".into())
+            if count == 0 {
+                Response::Ok("No paused jobs to resume".into())
             } else {
-                Response::Ok("Scheduler was not paused".into())
+                Response::Ok(format!("Resumed {count} paused job(s)"))
             }
         }
         Request::PauseJob { id } => {

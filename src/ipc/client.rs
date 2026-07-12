@@ -195,23 +195,18 @@ async fn rerun_many(settings: &Settings, id_args: &[String], priority: i32) -> a
     Ok(())
 }
 
-/// Pause or resume the scheduler (no ids) or specific jobs (one or more ids).
+/// Pause or resume every job at once (no ids) or specific jobs (one or more ids).
 ///
-/// With no ids this sends a single global `PauseScheduler`/`ResumeScheduler`.
-/// With ids it expands ranges and sends one `PauseJob`/`ResumeJob` per id,
-/// continuing past errors like the other multi-id commands.
+/// With no ids this pauses/resumes all jobs in bulk (see `pause_all` /
+/// `resume_all`). With ids it expands ranges and sends one `PauseJob`/`ResumeJob`
+/// per id, continuing past errors like the other multi-id commands.
 async fn pause_or_resume(settings: &Settings, id_args: &[String], pause: bool) -> anyhow::Result<()> {
     if id_args.is_empty() {
-        let request = if pause {
-            Request::PauseScheduler
+        return if pause {
+            pause_all(settings).await
         } else {
-            Request::ResumeScheduler
+            resume_all(settings).await
         };
-        let mut conn = connect_or_spawn(settings).await?;
-        protocol::write_msg(&mut conn, &request).await?;
-        let resp: Response = protocol::read_msg(&mut conn).await?;
-        drop(conn);
-        return render(resp).await;
     }
 
     let ids = parse_job_ids(id_args)?;
@@ -239,6 +234,57 @@ async fn pause_or_resume(settings: &Settings, id_args: &[String], pause: bool) -
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Pause every queued job at once (`msc pause` with no id). Running and terminal
+/// jobs are untouched. Sends a single `PauseAllQueued` request.
+async fn pause_all(settings: &Settings) -> anyhow::Result<()> {
+    let mut conn = connect_or_spawn(settings).await?;
+    protocol::write_msg(&mut conn, &Request::PauseAllQueued).await?;
+    let resp: Response = protocol::read_msg(&mut conn).await?;
+    drop(conn);
+    render(resp).await
+}
+
+/// Resume every paused job at once (`msc resume` with no id).
+///
+/// If nothing else is queued, all paused jobs go straight back to the queue.
+/// Otherwise some jobs were likely paused individually on purpose, so a bare
+/// `resume` would un-pause more than intended — warn and ask for confirmation
+/// before resuming them all.
+async fn resume_all(settings: &Settings) -> anyhow::Result<()> {
+    let jobs = fetch_all_jobs(settings).await?;
+    let paused = jobs.iter().filter(|j| j.state == JobState::Paused).count();
+    let queued = jobs.iter().filter(|j| j.state == JobState::Queued).count();
+
+    if paused == 0 {
+        eprintln!("(no paused jobs to resume)");
+        return Ok(());
+    }
+    if queued > 0 {
+        eprintln!("[WARN] {queued} job(s) are still queued (not paused).");
+        if !confirm(&format!("Resume all {paused} paused job(s) back into the queue?"))? {
+            eprintln!("Cancelled; no jobs were resumed.");
+            return Ok(());
+        }
+    }
+
+    let mut conn = connect_or_spawn(settings).await?;
+    protocol::write_msg(&mut conn, &Request::ResumeAllPaused).await?;
+    let resp: Response = protocol::read_msg(&mut conn).await?;
+    drop(conn);
+    render(resp).await
+}
+
+/// Print a yes/no prompt and read the answer from stdin. Defaults to "no": only
+/// an explicit `y`/`yes` (case-insensitive) confirms.
+fn confirm(prompt: &str) -> anyhow::Result<bool> {
+    use std::io::Write;
+    print!("{prompt} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"))
 }
 
 /// Sort key for execution-order listing:

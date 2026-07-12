@@ -48,10 +48,10 @@ pub enum Request {
         id: u32,
     },
     Clear,
-    /// Globally pause the scheduler: running jobs finish, no new jobs start.
-    PauseScheduler,
-    /// Resume a globally paused scheduler.
-    ResumeScheduler,
+    /// Move every queued job to the paused state at once.
+    PauseAllQueued,
+    /// Move every paused job back into the queue at once.
+    ResumeAllPaused,
     /// Pull a single queued job out of the queue until it is resumed.
     PauseJob {
         id: u32,

@@ -39,10 +39,10 @@ msc watch                         # watch the sole running job, or list the runn
 msc priority 3 10                 # bump a queued job's priority so it jumps the queue
 msc rerun 3                       # re-queue a fresh copy of job 3 (same command, dir, env) at priority 0
 msc rerun 3 -p 10                 # re-queue job 3 at a chosen priority instead of the default 0
-msc pause                         # pause the scheduler: running jobs finish, no new ones start
-msc resume                        # resume scheduling
+msc pause                         # pause every queued job; running ones finish, nothing new starts
+msc resume                        # put all paused jobs back into the queue
 msc pause 4 5-7                   # pull specific queued jobs out of the queue until resumed
-msc resume 4 5-7                  # put paused jobs back into the queue
+msc resume 4 5-7                  # put those paused jobs back into the queue
 msc kill 3                        # stop a running job, or drop a queued one
 msc kill --all                    # stop every running job and drop every queued one
 msc remove 3                      # remove a finished job from the list
@@ -120,15 +120,18 @@ msc kill --all   # stop all running jobs and clear the queue
 `pause` holds work back without cancelling it, in two granularities:
 
 ```bash
-msc pause        # pause the whole scheduler
-msc resume       # resume it
+msc pause        # pause every queued job at once
+msc resume       # put all paused jobs back into the queue
 msc pause 4 5-7  # pause specific queued jobs (ranges accepted)
 msc resume 4 5-7 # resume them
 ```
 
-- **Whole scheduler** (`pause` with no id): jobs already running finish normally,
-  but no new job starts until `resume`. The pause is remembered across a daemon
-  restart, so scheduling stays halted until you explicitly resume.
+- **All jobs** (`pause` with no id): every currently **queued** job is moved to
+  the `paused` state, so nothing new starts (jobs already running finish
+  normally). `resume` with no id puts them all back. If some jobs are still
+  queued when you `resume` (i.e. not everything pending is paused), a bare
+  `resume` would un-pause more than you may have intended, so it prints a warning
+  and asks for confirmation before resuming them all.
 - **Specific jobs** (`pause <ids>`): only affects **queued** jobs — each is pulled
   out of the queue (state `paused`) so the scheduler skips it, while the rest of
   the queue keeps flowing. `resume <ids>` puts them back. A paused job still shows

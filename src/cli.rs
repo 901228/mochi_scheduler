@@ -121,26 +121,27 @@ pub enum Command {
         priority: i32,
     },
 
-    /// Pause the scheduler, or pull specific queued jobs out of the queue.
+    /// Pause every queued job, or pull specific queued jobs out of the queue.
     ///
-    /// With no id, pauses the whole scheduler: running jobs finish but no new
-    /// job starts until `msc resume`. With one or more ids (ranges accepted,
-    /// e.g. `msc pause 12 15-18`), pauses just those queued jobs so the
-    /// scheduler skips them until they are resumed.
+    /// With no id, pauses all currently queued jobs at once (running jobs finish
+    /// but nothing new starts). With one or more ids (ranges accepted, e.g.
+    /// `msc pause 12 15-18`), pauses just those queued jobs so the scheduler
+    /// skips them until they are resumed.
     Pause {
-        /// Job id(s) to pause. Accepts ranges like `12-15`. Omit to pause the
-        /// whole scheduler.
+        /// Job id(s) to pause. Accepts ranges like `12-15`. Omit to pause every
+        /// queued job.
         #[arg(num_args = 0..)]
         ids: Vec<String>,
     },
 
-    /// Resume the scheduler, or put specific paused jobs back into the queue.
+    /// Resume every paused job, or put specific paused jobs back into the queue.
     ///
-    /// The inverse of `pause`: with no id it un-pauses the scheduler; with ids
-    /// (ranges accepted) it re-queues those paused jobs.
+    /// The inverse of `pause`: with no id it re-queues all paused jobs (asking
+    /// for confirmation first if other jobs are still queued); with ids (ranges
+    /// accepted) it re-queues just those paused jobs.
     Resume {
-        /// Job id(s) to resume. Accepts ranges like `12-15`. Omit to resume the
-        /// whole scheduler.
+        /// Job id(s) to resume. Accepts ranges like `12-15`. Omit to resume every
+        /// paused job.
         #[arg(num_args = 0..)]
         ids: Vec<String>,
     },

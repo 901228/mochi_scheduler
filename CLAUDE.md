@@ -99,12 +99,19 @@ sets a job's priority at enqueue time.
 `pause` / `resume` have two granularities selected by whether ids are given
 (clap `ids: Vec<String>` with `num_args = 0..`; the client routes empty-vs-ids in
 `pause_or_resume`):
-- **No ids → whole scheduler.** `Request::PauseScheduler` sets `AppState.paused`
-  (persisted, `serde(default) false`); `take_next_runnable` returns `None` while
-  it's set, so running jobs finish but nothing new starts. `resume`
-  (`ResumeScheduler`) clears it and notifies the scheduler to backfill. Both are
-  idempotent (report "already paused" / "was not paused"). The pause survives a
-  daemon restart (it's in `state.json`).
+- **No ids → all jobs.** `Request::PauseAllQueued` → `AppState::pause_all_queued`
+  moves every `Queued` job to `Paused` (running/terminal untouched) and returns
+  the count; the scheduler then starts nothing (only `Queued` is runnable), so
+  running jobs finish but nothing new starts. `resume` (`ResumeAllPaused` →
+  `resume_all_paused`) moves every `Paused` job back to `Queued` and notifies the
+  scheduler. There is **no global paused flag** anymore — the state lives entirely
+  in the jobs, so pausing then adding a fresh job lets that new job run. The
+  no-id `resume` is **client-side guarded**: `resume_all` first fetches the job
+  list; if any jobs are still `Queued` (i.e. not everything pending was paused) it
+  prints a `[WARN]` and asks for y/N confirmation (`confirm`, defaults to no)
+  before sending `ResumeAllPaused`, since a bare `resume` would otherwise un-pause
+  more than intended. With nothing queued it resumes immediately; with no paused
+  jobs it prints `(no paused jobs to resume)`.
 - **With ids → individual jobs.** `PauseJob`/`ResumeJob` per id (ranges expanded
   client-side like `kill`). `pause_job` moves a **queued** job to the new
   `JobState::Paused` (errors on running/terminal via `PauseJobOutcome::NotQueued`;
@@ -297,7 +304,7 @@ applicable on this OS.
 | Multi-id `priority` (ranges) | ✅ 06-28 | ✅ | ➖ | `priority 348 349-351 999999 20`: trailing arg is the value, sets the queued range; errors on running (`not queued`)/missing while continuing, exits 1. |
 | Multi-id `rerun` (ranges) | ✅ 06-28 | ✅ | ➖ | `rerun 343-345 347 999999`: re-queues each source as a new job, sources untouched, errors on missing while continuing, exits 1. |
 | Execution-order `list` + `--by-id` | ✅ 06-28 | ✅ | ➖ | Default view: running first, then queued by priority desc / id asc; `--by-id` → pure id order. `--all` / `--state` always id (chronological) order regardless of `--by-id`. |
-| Global `pause` / `resume` | ✅ 07-07 | ➖ | ➖ | `pause` (no id) holds new scheduling: added jobs stayed `queued`, none ran; `resume` restarted them (cpu-limit 1 → one running). Idempotent replies ("already paused" / "was not paused"). Persisted flag survives restart. |
+| Bulk `pause` / `resume` (no id) | ✅ 07-12 | ➖ | ➖ | `pause` (no id) → every `queued` job becomes `paused` ("Paused N queued job(s)"); scheduler starts nothing new. `resume` (no id) with nothing else queued re-queues them all straight away; with other jobs still queued it prints a `[WARN]` and prompts y/N (`n` cancels, `y` resumes all). No global paused flag — pausing then adding a job lets the new job run. |
 | Per-job `pause` / `resume` (ranges) | ✅ 07-07 | ➖ | ➖ | `pause 447-448` → `Paused`; scheduler **skips** them (killing the running job started nothing while both paused); `resume` → `Queued` and runs. Errors on running (pause)/non-paused (resume)/missing while continuing (exit 1). Shows in default `list`. |
 | `watch` from-now default + `--from-start`/`-a` | ✅ 07-07 | ➖ | ➖ | Default watch on a job mid-output showed only new lines (LINE-5..8), while `cat` had all 8; `--from-start` and the `-a` alias replayed the whole log (LINE-1..8). |
 | `info` elapsed | ✅ 07-07 | ➖ | ➖ | `elapsed` row: `-` while queued, live (`4s`) while running, fixed (`24s` = finished−started) once terminal. |
@@ -305,9 +312,10 @@ applicable on this OS.
 The multi-id and execution-order rows are pure client-side logic (no `#[cfg]`
 branches), so Linux and Windows behave identically; their Windows runs (2026-06-28,
 against the installed daemon with throwaway jobs and a temporary `cpu-limit 1`)
-double as confirmation for both. The 2026-07-07 rows (pause/resume, watch
-from-now, info elapsed) are likewise `#[cfg]`-free — the pause gate lives in
-`take_next_runnable` / the daemon, the rest is client-side — so they are expected
-to behave identically on Linux/macOS, but have only been exercised on Windows so
-far. macOS remains the only fully unverified target — fill in its column once a
+double as confirmation for both. The 2026-07-07 / 2026-07-12 rows (pause/resume,
+watch from-now, info elapsed) are likewise `#[cfg]`-free — the per-job pause skip
+lives in `take_next_runnable`, the bulk pause/resume-all in the daemon, the rest
+is client-side — so they are expected to behave identically on Linux/macOS, but
+have only been exercised on Windows so far. macOS remains the only fully
+unverified target — fill in its column once a
 machine is available.
