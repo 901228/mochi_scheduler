@@ -10,7 +10,7 @@ use super::{
     protocol::{self, Request, Response},
 };
 use crate::{
-    cli::{Command, ConfigCommand, StateFilter},
+    cli::{Command, ConfigCommand, DaemonCommand, StateFilter},
     settings::Settings,
     utils::pretty_table::Table,
 };
@@ -70,16 +70,18 @@ fn build_request(command: Command) -> anyhow::Result<Request> {
         },
         Command::Remove { id } => Request::Remove { id },
         Command::Clear => Request::Clear,
-        Command::Devices => Request::GetDevices,
-        Command::Config { setting } => match setting {
+        Command::Daemon { command } => match command {
+            DaemonCommand::Devices => Request::GetDevices,
             // No argument -> query; a number sets it, with 0 meaning unlimited.
-            ConfigCommand::CpuLimit { limit: None } => Request::GetCpuLimit,
-            ConfigCommand::CpuLimit { limit: Some(0) } => Request::SetCpuLimit { limit: None },
-            ConfigCommand::CpuLimit { limit: Some(n) } => Request::SetCpuLimit { limit: Some(n) },
+            DaemonCommand::Config { setting } => match setting {
+                ConfigCommand::CpuLimit { limit: None } => Request::GetCpuLimit,
+                ConfigCommand::CpuLimit { limit: Some(0) } => Request::SetCpuLimit { limit: None },
+                ConfigCommand::CpuLimit { limit: Some(n) } => Request::SetCpuLimit { limit: Some(n) },
+            },
+            DaemonCommand::Shutdown => Request::Shutdown,
         },
-        Command::Shutdown => Request::Shutdown,
         Command::Watch { .. } => unreachable!("watch is handled in run"),
-        Command::Daemon => unreachable!("daemon is dispatched in main"),
+        Command::RunDaemon => unreachable!("daemon is dispatched in main"),
     })
 }
 

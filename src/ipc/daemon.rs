@@ -15,8 +15,8 @@ use tokio::sync::{Notify, oneshot};
 use super::{
     protocol::{self, Request, Response},
     scheduler::{
-        AppState, KillOutcome, PauseJobOutcome, RemoveOutcome, RestartOutcome, ResumeJobOutcome,
-        RunResult, RunSpec, SetPriorityOutcome,
+        AppState, KillOutcome, PauseJobOutcome, RemoveOutcome, RestartOutcome, ResumeJobOutcome, RunResult,
+        RunSpec, SetPriorityOutcome,
     },
 };
 use crate::{gpu, process_tree, settings::Settings};

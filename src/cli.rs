@@ -179,6 +179,21 @@ pub enum Command {
     /// Remove all finished/killed/failed jobs from the list.
     Clear,
 
+    /// Inspect or control the background daemon (devices, settings, shutdown).
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommand,
+    },
+
+    /// Internal: run the background daemon (not meant to be called directly).
+    #[command(name = "__daemon", hide = true)]
+    RunDaemon,
+}
+
+/// Daemon-level operations, grouped under `msc daemon` to keep them out of the
+/// top-level job commands. These act on the daemon/host, not a single job.
+#[derive(Subcommand, Debug)]
+pub enum DaemonCommand {
     /// Show the GPU devices detected by the daemon at startup.
     Devices,
 
@@ -190,10 +205,6 @@ pub enum Command {
 
     /// Stop the background daemon.
     Shutdown,
-
-    /// Internal: run the background daemon (not meant to be called directly).
-    #[command(name = "__daemon", hide = true)]
-    Daemon,
 }
 
 /// Job states that `msc list --state` can filter on. Mirrors `JobState`.

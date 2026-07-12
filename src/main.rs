@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
     let settings = Settings::resolve()?;
 
     match cli.command {
-        Command::Daemon => daemon::run(settings).await,
+        Command::RunDaemon => daemon::run(settings).await,
         other => client::run(settings, other).await,
     }
 }

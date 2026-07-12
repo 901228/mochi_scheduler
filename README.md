@@ -49,9 +49,13 @@ msc kill 3                        # stop a running job, or drop a queued one
 msc kill --all                    # stop every running job and drop every queued one
 msc remove 3                      # remove a finished job from the list
 msc clear                         # remove all finished/killed/failed jobs
-msc config cpu-limit 4            # cap concurrent CPU (non-GPU) jobs at 4 (0 = unlimited)
-msc shutdown                      # stop the background daemon
+msc daemon config cpu-limit 4     # cap concurrent CPU (non-GPU) jobs at 4 (0 = unlimited)
+msc daemon devices                # show the GPUs the daemon detected
+msc daemon shutdown               # stop the background daemon
 ```
+
+Job commands (`add`, `list`, `kill`, ...) sit at the top level; daemon-level
+operations are grouped under `msc daemon` (`config`, `devices`, `shutdown`).
 
 The daemon starts automatically the first time you run any command, so you never
 launch it by hand.
@@ -156,16 +160,16 @@ msc resume 4 5-7 # resume them
 ### Limiting CPU jobs
 
 By default CPU (non-GPU) jobs run with unlimited concurrency. Cap how many run at
-once with `config cpu-limit`:
+once with `daemon config cpu-limit`:
 
 ```bash
-msc config cpu-limit 4   # at most 4 CPU jobs run concurrently; the rest queue
-msc config cpu-limit     # show the current limit
-msc config cpu-limit 0   # unlimited again (the default)
+msc daemon config cpu-limit 4   # at most 4 CPU jobs run concurrently; the rest queue
+msc daemon config cpu-limit     # show the current limit
+msc daemon config cpu-limit 0   # unlimited again (the default)
 ```
 
 The cap is persisted and applies only to CPU jobs; GPU jobs remain bounded by the
-GPU pool. Other daemon settings live under `msc config` too.
+GPU pool. Other daemon settings live under `msc daemon config` too.
 
 ## Working directory & environment
 
