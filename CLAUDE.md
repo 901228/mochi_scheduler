@@ -63,7 +63,8 @@ background process and is not meant to be called directly.
 state and `--state <S>` (repeatable, mutually exclusive with `--all`) shows
 exactly those states. The **default** active-jobs view is sorted by **execution
 order** (running first, then queued jobs in priority order matching the scheduler,
-then paused jobs); `--by-id` reverts that view to id-order. The `--all` and `--state` views always use id-order
+then paused jobs — also in priority order, i.e. the order they would run once
+resumed); `--by-id` reverts that view to id-order. The `--all` and `--state` views always use id-order
 (chronological, natural for history), so `--by-id` is a no-op there. Filtering and
 sorting are **client-side** (the daemon still returns all jobs), so the `List`
 protocol is unchanged.

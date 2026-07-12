@@ -317,13 +317,17 @@ fn confirm(prompt: &str) -> anyhow::Result<bool> {
 /// Sort key for execution-order listing:
 ///   running jobs  (group 0) — by id
 ///   queued jobs   (group 1) — by descending priority then id (matches scheduler)
-///   paused jobs   (group 2) — by id
+///   paused jobs   (group 2) — by descending priority then id (order once resumed)
 ///   terminal jobs (group 3) — by id
+///
+/// Paused jobs stay in their own group after running and queued jobs, but within
+/// that group they are ordered the same way the scheduler would run them once
+/// resumed (priority first, then id), rather than by id alone.
 fn execution_order_key(job: &Job) -> (u8, i64, u32) {
     match job.state {
         JobState::Running => (0, 0, job.id),
         JobState::Queued => (1, -(job.priority as i64), job.id),
-        JobState::Paused => (2, 0, job.id),
+        JobState::Paused => (2, -(job.priority as i64), job.id),
         _ => (3, 0, job.id),
     }
 }
@@ -801,6 +805,43 @@ mod tests {
         assert!(state_wanted(false, &filters, &JobState::Paused));
         assert!(!state_wanted(false, &filters, &JobState::Queued));
         assert!(!state_wanted(false, &filters, &JobState::Running));
+    }
+
+    fn job_with(id: u32, state: JobState, priority: i32) -> Job {
+        Job {
+            id,
+            argv: vec!["x".into()],
+            label: None,
+            cwd: std::path::PathBuf::from("."),
+            state,
+            exit_code: None,
+            log_path: std::path::PathBuf::from("x.log"),
+            enqueued_at: Utc::now(),
+            started_at: None,
+            finished_at: None,
+            priority,
+            gpus: 0,
+            assigned_gpus: Vec::new(),
+            env: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn execution_order_groups_by_state_then_priority() {
+        // Deliberately shuffled input across states and priorities.
+        let mut jobs = vec![
+            job_with(5, JobState::Paused, 0),   // paused, low priority
+            job_with(3, JobState::Queued, 1),   // queued, mid priority
+            job_with(7, JobState::Running, 0),  // running
+            job_with(4, JobState::Paused, 9),   // paused, high priority -> first paused
+            job_with(2, JobState::Queued, 9),   // queued, high priority -> first queued
+            job_with(1, JobState::Finished, 0), // terminal -> last
+        ];
+        jobs.sort_by_key(execution_order_key);
+        let order: Vec<u32> = jobs.iter().map(|j| j.id).collect();
+        // running (7), then queued by priority desc (2 then 3), then paused by
+        // priority desc (4 then 5), then terminal (1).
+        assert_eq!(order, vec![7, 2, 3, 4, 5, 1]);
     }
 
     #[test]
